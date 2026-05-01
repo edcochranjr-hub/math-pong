@@ -1,0 +1,3376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Math Pong</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Trebuchet MS', 'Segoe UI', sans-serif; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+let W = 0, H = 0;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  placePaddles();
+  initStars();
+}
+
+const TAU = Math.PI * 2;
+const rand = (a, b) => Math.floor(Math.random() * (b - a + 1)) + a;
+const randF = (a, b) => Math.random() * (b - a) + a;
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const easeInOut = t => t < 0.5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2;
+
+function pickWeighted(arr, weights) {
+  const total = weights.reduce((a,b)=>a+b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < arr.length; i++) { r -= weights[i]; if (r <= 0) return arr[i]; }
+  return arr[arr.length-1];
+}
+
+// === PERSISTENCE (localStorage) ===
+const LS_KEY = 'mathPongV2';
+function loadStore() {
+  try { const s = localStorage.getItem(LS_KEY); return s ? JSON.parse(s) : {}; } catch (e) { return {}; }
+}
+function saveStore() {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(store)); } catch (e) {}
+}
+const store = loadStore();
+store.names = store.names || { left: 'PLAYER 1', right: 'PLAYER 2' };
+store.stats = store.stats || { totalSolved: 0, bestStreak: 0, gamesPlayed: 0, weakSpots: {} };
+store.muted = !!store.muted;
+store.multiChoice = !!store.multiChoice;
+store.customSetup = store.customSetup || {
+  ops: { add: true, sub: true, mul: false, div: false, pow: false, alg: false },
+  difficulty: 2,
+};
+// Persistent rolling buffer of recently-seen problem texts. Used to avoid
+// repetition across sessions, especially at low complexity where the problem
+// space is small (1-9 add has only 81 possibilities).
+store.recentProblems = Array.isArray(store.recentProblems) ? store.recentProblems : [];
+// Head-to-head records, keyed { [winnerName]: { [loserName]: winCount } }.
+// Lookup symmetric pair: store.records.TREY?.MIMI vs store.records.MIMI?.TREY.
+store.records = store.records || {};
+saveStore();
+
+function recordResult(winnerName, loserName) {
+  // Skip generic defaults — H2H is only meaningful for named players.
+  const generic = (n) => !n || n === 'PLAYER 1' || n === 'PLAYER 2';
+  if (generic(winnerName) || generic(loserName)) return;
+  store.records[winnerName] = store.records[winnerName] || {};
+  store.records[winnerName][loserName] = (store.records[winnerName][loserName] || 0) + 1;
+  saveStore();
+}
+
+function getH2H(nameA, nameB) {
+  const generic = (n) => !n || n === 'PLAYER 1' || n === 'PLAYER 2';
+  if (generic(nameA) || generic(nameB)) return null;
+  const aWins = (store.records[nameA] || {})[nameB] || 0;
+  const bWins = (store.records[nameB] || {})[nameA] || 0;
+  if (aWins === 0 && bWins === 0) return null;
+  return { nameA, nameB, aWins, bWins };
+}
+
+// === AUDIO ===
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+}
+function beep(freq, dur = 0.12, type = 'square', vol = 0.16) {
+  if (store.muted || !audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+  o.connect(g);
+  g.connect(audioCtx.destination);
+  o.start();
+  o.stop(audioCtx.currentTime + dur);
+}
+const sfx = {
+  type:      () => beep(660, 0.04, 'square', 0.06),
+  correct:   () => { beep(660, 0.08, 'square'); setTimeout(()=>beep(990,0.12,'square'), 60); setTimeout(()=>beep(1320,0.12,'square'), 130); },
+  wrong:     () => { beep(180, 0.18, 'sawtooth', 0.22); setTimeout(()=>beep(120,0.22,'sawtooth',0.22), 100); },
+  hit:       () => beep(520, 0.08, 'triangle', 0.18),
+  score:     () => { beep(880, 0.1); setTimeout(()=>beep(1320,0.12), 80); setTimeout(()=>beep(1760,0.18), 160); },
+  spectacle: () => { for (let i=0;i<10;i++) setTimeout(()=>beep(220+i*90, 0.1, 'sawtooth', 0.10), i*40); },
+  level:     () => { beep(523,0.1); setTimeout(()=>beep(659,0.1),100); setTimeout(()=>beep(784,0.16),200); },
+};
+
+const STATES = {
+  TITLE: 'title',
+  NAME_ENTRY: 'nameEntry',
+  PRACTICE_MENU: 'practiceMenu',
+  CUSTOM_SETUP: 'customSetup',
+  EASTER_MESSAGE: 'easterMessage',
+  HELP: 'help',
+  RECORDS: 'records',
+  PROBLEM: 'problem',
+  BALL: 'ball',
+  RESULT: 'result',
+  PONG: 'pong',
+  GAME_OVER: 'over',
+};
+
+// Easter egg: love note from Dad to Trey, shown before standalone Pong.
+// Edit freely — kept as a single string so wrapping is automatic.
+const EASTER_MESSAGE = "Hey Trey! Dad loves you buddy, thanks for helping me build this cool game. Your ideas are awesome! Great football practice Thursday MR MVP!!! I love you and am proud of you. Me and Mom both are so lucky you are our son and the biggest brother to the 3 littles. Love ya buddy brewski ole brodal walker, mr broc-lee. Have fun this weekend!";
+
+// Pong interlude tuning — fires once per match after PONG_TRIGGER correct
+// answers, plays first-to-PONG_WIN_SCORE, then math game resumes.
+const PONG = {
+  TRIGGER: 10,
+  WIN_SCORE: 3,
+  PADDLE_W: 18,
+  PADDLE_H: 110,
+  BALL_R: 12,
+  PADDLE_SPEED: 900,    // px/sec target velocity for keyboard input
+  BALL_INIT_SPEED: 520,
+  BALL_ACCEL: 1.06,     // multiplier on dx per paddle hit
+  BALL_MAX_SPEED: 1200,
+  SERVE_COUNTDOWN: 1.4, // seconds before each serve
+  END_HOLD: 2.6,        // seconds to display "X WINS THE INTERLUDE" before returning to math
+};
+const WIN_SCORE = 7;
+
+const DIFFICULTIES = {
+  KIDS: {
+    name: 'KIDS  (ages 6-9)',
+    blurb: 'Big, gentle ramp. Add/sub/times tables only.',
+    minTime: 3.0,
+    maxTime: 6.0,
+    maxDrop: 0.5,
+    maxTier: 4,
+    tierMult: 2.2,
+    cpu: { thinkAvg: 4.0, thinkStd: 1.4, accuracy: 0.78 },
+  },
+  FAMILY: {
+    name: 'FAMILY  (ages 9-13)',
+    blurb: 'Default — covers add through powers.',
+    minTime: 2.0,
+    maxTime: 5.0,
+    maxDrop: 0.8,
+    maxTier: 8,
+    tierMult: 1.4,
+    cpu: { thinkAvg: 2.6, thinkStd: 1.0, accuracy: 0.86 },
+  },
+  GENIUS: {
+    name: 'GENIUS  (13+)',
+    blurb: 'Negatives, faster ramp, full pressure.',
+    minTime: 1.5,
+    maxTime: 5.0,
+    maxDrop: 1.2,
+    maxTier: 9,
+    tierMult: 1.0,
+    cpu: { thinkAvg: 1.6, thinkStd: 0.7, accuracy: 0.92 },
+  },
+};
+const DIFF_KEYS = ['KIDS', 'FAMILY', 'GENIUS'];
+let diffIdx = 1;
+const curDiff = () => DIFFICULTIES[DIFF_KEYS[diffIdx]];
+
+const PRACTICE_OPS = ['mixed', 'add', 'sub', 'mul', 'div', 'pow', 'alg'];
+const PRACTICE_OP_LABELS = {
+  mixed: 'MIXED  (everything by tier)',
+  add:   'ADDITION  +',
+  sub:   'SUBTRACTION  −',
+  mul:   'MULTIPLICATION  ×',
+  div:   'DIVISION  ÷',
+  pow:   'POWERS  ^',
+  alg:   'ALGEBRA  (find x)',
+};
+
+// === NAMED-PLAYER PHRASES ===
+// Custom one-liners that occasionally appear on the game-over screen for
+// specific named players. Edit phrases here. Trigger logic lives in
+// setupGameOverPhrases() — see PHRASE_CHANCE for the trigger probability.
+//
+// Schema is intentionally flexible: each named player has buckets that the
+// trigger logic knows how to consume (e.g. MIMI.lose, TREY.winVsMimi).
+const NAME_PHRASES = {
+  MIMI: {
+    // Mimi has no custom WIN line — she gets normal cheering like any other
+    // named player. When she LOSES, 25% chance of one of these.
+    lose: [
+      "Don't you hide my silverware",
+      "Tom Brady is great",
+      "Addie needs her diaper changed",
+      "Buy your grandkids a treat",
+      "Trey is VICTORIOUS",
+    ],
+  },
+  TREY: {
+    // Trey only gets a special line when he beats MIMI specifically. 25% chance.
+    // Against any other opponent, normal cheering.
+    winVsMimi: [
+      "Brodal Walker Wins!",
+      "Broc-Lee Victory",
+      "Buddy Skaduddy for the W",
+      "6-7 6-7 6-7 6-7",
+      "I am the Human Calculator!",
+      "I love Dadda",
+      "Chicken Jockey",
+      "Sour Skittles for the dude",
+      "Trey is the greatest dude",
+    ],
+  },
+};
+// Trigger probability for any named-phrase roll. 0.25 = 25%.
+const PHRASE_CHANCE = 0.25;
+
+const CUSTOM_OPS_ORDER = ['add', 'sub', 'mul', 'div', 'pow', 'alg'];
+const CUSTOM_OP_LABELS = {
+  add: '+   ADDITION',
+  sub: '−   SUBTRACTION',
+  mul: '×   TIMES TABLES',
+  div: '÷   DIVISION',
+  pow: '^   POWERS',
+  alg: 'x   ALGEBRA',
+};
+const CUSTOM_DIFF_LABELS = [
+  'EASY        small numbers (1–9)',
+  'BASIC       up to 25',
+  'STANDARD    up to 99',
+  'HARD        up to 500',
+  'EXTREME     up to 9999',
+];
+
+const game = {
+  state: STATES.TITLE,
+  mode: 'versus2p', // 'versus2p' | 'versus1p' | 'practice' | 'custom'
+  practiceOp: 'mixed',
+  paused: false,
+  pauseStart: 0,
+  matchBestStreak: 0,
+  nameEntry: { side: 'left', text: '' },
+  cpu: { thinking: false, target: 0, elapsed: 0, willMiss: false, missAmount: 0 },
+  // After a tier introduces a new op, force the next several problems to use it
+  // so the player actually gets to practice what just unlocked.
+  recentlyUnlockedOp: null,
+  recentlyUnlockedRemaining: 0,
+  // Custom-mode setup, persisted to localStorage
+  customSetup: {
+    ops: { add: true, sub: true, mul: false, div: false, pow: false, alg: false },
+    difficulty: 2, // 1-5
+    customMenuCursor: 0,
+  },
+  // Phrases shown on the game-over screen for named players (e.g. MIMI). Picked
+  // once when GAME_OVER fires so they don't change every render frame.
+  gameOverPhrases: { winPhrase: null, losePhrase: null },
+  // Rolling buffer of recently-seen problem texts. Initialized from localStorage
+  // so it persists across sessions — yesterday's problems won't immediately
+  // repeat today. Trimmed to 50 entries; saved back to store on every new round.
+  recentProblems: [...(store.recentProblems || [])],
+  // Multiple-choice input mode: 4 choices per problem, pick with 1-4 keys.
+  // Toggle on title with C. Persists in localStorage.
+  multiChoice: !!store.multiChoice,
+  // Pong interlude state (null when not in PONG state).
+  pong: null,
+  // Once-per-match flag so the interlude only fires once.
+  pongFiredThisMatch: false,
+  stateTimer: 0,
+  ball: { x: 0, y: 0, r: 14, color: '#fff', trail: [], travel: null },
+  paddleL: { x: 0, y: 0, w: 16, h: 120, color1: '#56e2ff', color2: '#3b82f6', name: store.names.left,  side: 'left',  pulse: 0, targetY: 0, vibe: 0 },
+  paddleR: { x: 0, y: 0, w: 16, h: 120, color1: '#ff7ad8', color2: '#a855f7', name: store.names.right, side: 'right', pulse: 0, targetY: 0, vibe: 0 },
+  score: { left: 0, right: 0 },
+  streak: { left: 0, right: 0 },
+  totalCorrect: 0,
+  prevTier: 1,
+  current: null,
+  particles: [],
+  effects: [],
+  stars: [],
+  shake: { mag: 0, t: 0 },
+  flash: { color: '#fff', a: 0 },
+  toast: { text: '', t: 0, color: '#fff' },
+  winnerSide: null,
+  lastTimeUsed: null,
+  lastTimeLimit: null,
+};
+
+function updatePaddleNames() {
+  game.paddleL.name = store.names.left;
+  game.paddleR.name = game.mode === 'versus1p' ? 'CPU' : store.names.right;
+}
+
+function namesAreDefault() {
+  return store.names.left === 'PLAYER 1' || store.names.right === 'PLAYER 2';
+}
+
+function loadCustomSetupFromStore() {
+  game.customSetup.ops = Object.assign({ add: true, sub: true, mul: false, div: false, pow: false, alg: false }, store.customSetup.ops || {});
+  game.customSetup.difficulty = store.customSetup.difficulty || 2;
+}
+loadCustomSetupFromStore();
+
+function persistCustomSetup() {
+  store.customSetup = {
+    ops: Object.assign({}, game.customSetup.ops),
+    difficulty: game.customSetup.difficulty,
+  };
+  saveStore();
+}
+
+function placePaddles() {
+  game.paddleL.x = 40;
+  game.paddleL.h = clamp(H * 0.16, 90, 160);
+  game.paddleL.y = H/2 - game.paddleL.h/2;
+  game.paddleR.x = W - 40 - game.paddleR.w;
+  game.paddleR.h = game.paddleL.h;
+  game.paddleR.y = H/2 - game.paddleR.h/2;
+}
+
+function initStars() {
+  game.stars = [];
+  for (let i = 0; i < 220; i++) {
+    game.stars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      z: randF(0.2, 1),
+      r: randF(0.4, 1.8),
+      tw: randF(0, TAU),
+    });
+  }
+}
+
+function difficultyTier() {
+  const m = curDiff().tierMult;
+  const e = game.totalCorrect / m;
+  let t;
+  if (e < 4)        t = 1;
+  else if (e < 8)   t = 2;
+  else if (e < 14)  t = 3;
+  else if (e < 20)  t = 4;
+  else if (e < 26)  t = 5;
+  else if (e < 34)  t = 6;
+  else if (e < 42)  t = 7;
+  else if (e < 50)  t = 8;
+  else              t = 9;
+  return Math.min(t, curDiff().maxTier);
+}
+
+// Extra seconds granted for problems that require real mental work beyond typing.
+// Tuned so big problems always have 3-4 seconds even when the other player just
+// answered fast. "Smart kid doing it in their head" — not savant pace.
+function thinkingBonus(problem) {
+  if (!problem) return 0;
+  const op = problem.op;
+  const a = Math.abs(problem.answer || 0);
+  if (op === 'pow') {
+    if (a > 1000) return 2.5;   // 9^4 = 6561, hard mental
+    if (a > 200)  return 1.8;   // 5^3, 6^3, 7^3
+    if (a > 50)   return 1.2;   // 8^2, 4^3
+    return 0.8;                 // 2^3, 3^2
+  }
+  if (op === 'alg') {
+    if (problem.algType === 'linear') return 2.5;  // two-step ax±b=c
+    if (problem.algType === 'mul')    return 1.5;  // ax=c
+    return 1.0;                                    // single-step
+  }
+  if (op === 'mul' || op === 'div') {
+    if (a > 500) return 1.5;
+    if (a > 100) return 1.0;    // 12*9=108
+    if (a > 30)  return 0.5;
+    return 0;
+  }
+  if (op === 'add' || op === 'sub') {
+    if (a > 5000) return 1.5;   // 4-digit sums
+    if (a > 500)  return 1.2;   // 3-digit sums (e.g. 143+192=335)
+    if (a > 100)  return 0.7;
+    if (a > 30)   return 0.3;
+    return 0;
+  }
+  return 0;
+}
+
+function nextTimeLimit(timeUsed, currentLimit, problem) {
+  const d = curDiff();
+  const digits = String(Math.abs(problem.answer || 0)).length;
+  const typingFloor = 1.5 + 0.4 * Math.max(0, digits - 1);
+  const bonus = thinkingBonus(problem);
+  const floor = Math.max(typingFloor, d.minTime) + bonus;
+  const target = timeUsed + 1.0 + bonus;
+  const candidate = Math.max(target, currentLimit - d.maxDrop);
+  const cap = Math.max(d.maxTime + bonus, floor + 0.5);
+  return clamp(candidate, floor, cap);
+}
+
+function tierName(t) {
+  // Operator symbols, not aspirational labels — what's actually in the problem pool at this tier.
+  return ['', '+', '+ −', '+ −', '+ − ×', '+ − ×', '+ − × ÷', '+ − × ÷', '+ − × ÷ ^', '+ − × ÷ ^  (±)'][t] || '';
+}
+
+function tierIntroducesOp(t) {
+  if (t === 2) return 'sub';
+  if (t === 4) return 'mul';
+  if (t === 6) return 'div';
+  if (t === 8) return 'pow';
+  return null;
+}
+
+function opUnlockText(op) {
+  return ({
+    sub: 'NEW:  SUBTRACTION  −',
+    mul: 'NEW:  TIMES TABLES  ×',
+    div: 'NEW:  DIVISION  ÷',
+    pow: 'NEW:  POWERS  ^',
+  })[op] || '';
+}
+
+function fmt(n, isFirst) {
+  if (n < 0) return '(−' + (-n) + ')';
+  return String(n);
+}
+
+// Per-op magnitude bands. `complexity` is round/tierMult — both players use the
+// same complexity at the same moment, so both sides face matching ranges.
+//
+// FAMILY mode (tierMult 1.4) hits triple digits around round 12 (complexity ~8.6).
+// KIDS mode (mult 2.2) ramps slower; GENIUS (mult 1.0) ramps fastest.
+function magnitudeFor(op, complexity) {
+  const c = complexity;
+  if (op === 'add' || op === 'sub') {
+    // Slower, more incremental ramp. Big numbers don't appear until later rounds.
+    if (c <= 2.5) return { min: 1,   max: 9 };       // r1-3 FAMILY: pure single digit
+    if (c <= 4.5) return { min: 2,   max: 12 };      // r4-6: single + edges of teens
+    if (c <= 6.5) return { min: 4,   max: 22 };      // r7-9: low double digits (teens to low 20s)
+    if (c <= 8.5) return { min: 12,  max: 50 };      // r10-11: high doubles, edge of triples
+    if (c <= 10)  return { min: 25,  max: 99 };      // r12-13: high doubles capped at 99
+    if (c <= 12)  return { min: 50,  max: 200 };     // r14-16: low triples
+    if (c <= 15)  return { min: 100, max: 500 };     // r17-20: full triples
+    if (c <= 18)  return { min: 250, max: 1500 };    // r21-25: 4-digit
+    return             { min: 500, max: 9999 };
+  }
+  if (op === 'mul') {
+    if (c <= 4)   return { aMin: 2, aMax: 5,  bMin: 2, bMax: 5  };   // tiny times tables
+    if (c <= 6)   return { aMin: 2, aMax: 9,  bMin: 2, bMax: 6  };   // 9×6 territory
+    if (c <= 9)   return { aMin: 2, aMax: 9,  bMin: 2, bMax: 9  };   // standard 9×9
+    if (c <= 12)  return { aMin: 2, aMax: 12, bMin: 2, bMax: 12 };   // through 12×12
+    if (c <= 15)  return { aMin: 5, aMax: 25, bMin: 2, bMax: 9  };   // 25×9
+    if (c <= 18)  return { aMin: 10, aMax: 50, bMin: 2, bMax: 12 };
+    return             { aMin: 15, aMax: 99, bMin: 2, bMax: 12 };
+  }
+  if (op === 'div') {
+    if (c <= 5)   return { qMin: 2, qMax: 5,  dMin: 2, dMax: 5  };
+    if (c <= 8)   return { qMin: 2, qMax: 9,  dMin: 2, dMax: 6  };
+    if (c <= 11)  return { qMin: 2, qMax: 9,  dMin: 2, dMax: 9  };
+    if (c <= 14)  return { qMin: 2, qMax: 12, dMin: 2, dMax: 12 };
+    if (c <= 17)  return { qMin: 3, qMax: 20, dMin: 2, dMax: 12 };
+    return             { qMin: 5, qMax: 50, dMin: 2, dMax: 12 };
+  }
+  if (op === 'pow') {
+    // "In powers single digits up to 5 max" by round 10-12.
+    if (c <= 12)  return { baseMin: 2, baseMax: 5, exps: [2, 2, 3] };
+    if (c <= 18)  return { baseMin: 2, baseMax: 6, exps: [2, 2, 3, 3] };
+    return             { baseMin: 2, baseMax: 9, exps: [2, 3, 3, 4] };
+  }
+  return { min: 1, max: 9 };
+}
+
+function genProblem(easy, opOverride) {
+  if (easy && !opOverride) {
+    const a = rand(1,9), b = rand(1,9);
+    return { text: `${a} + ${b}`, answer: a + b, op: 'add' };
+  }
+
+  // Custom mode has its own generator (player-defined ops + difficulty).
+  if (game.mode === 'custom') return genCustomProblem();
+
+  const tier = difficultyTier();
+  const allowed = ['add'];
+  if (tier >= 2) allowed.push('sub');
+  if (tier >= 4) allowed.push('mul');
+  if (tier >= 6) allowed.push('div');
+  if (tier >= 8) allowed.push('pow');
+
+  let op;
+  let isFreshOp = false;
+  if (opOverride && opOverride !== 'mixed') {
+    // Practice mode: respect player's choice even if outside the natural tier.
+    op = opOverride;
+  } else if (game.mode === 'practice') {
+    op = pick(allowed);
+  } else if (game.recentlyUnlockedRemaining > 0 &&
+             game.recentlyUnlockedOp &&
+             allowed.indexOf(game.recentlyUnlockedOp) !== -1) {
+    // Freshness bias: just unlocked an op — force it for several rounds so the
+    // tier label and the actual problems agree.
+    op = game.recentlyUnlockedOp;
+    isFreshOp = true;
+    game.recentlyUnlockedRemaining--;
+    if (game.recentlyUnlockedRemaining === 0) game.recentlyUnlockedOp = null;
+  } else {
+    // Weak-spot weighting in versus mode: ops with more recent misses get sampled more
+    const weights = allowed.map(o => 1 + (store.stats.weakSpots[o] || 0) * 0.35);
+    op = pickWeighted(allowed, weights);
+  }
+
+  // Smooth round-based magnitude ramp. Both sides use the same complexity, so
+  // they always face similar number ranges (no more "one side gets 4+1 while
+  // the other gets 87+92").
+  const round = game.totalCorrect + 1;
+  let complexity = round / curDiff().tierMult;
+  // Newly-unlocked op: ease the player in on small numbers for the forced rounds.
+  if (isFreshOp) {
+    complexity = Math.min(complexity, 5);
+  }
+  // 3% chance of a small "variety bump" in early rounds — drops in a slightly
+  // harder problem for spice, prevents single-digit monotony. Capped to avoid
+  // giant jumps.
+  if (complexity <= 6 && Math.random() < 0.03) {
+    complexity = Math.min(complexity + 1.5, 7);
+  }
+  const m = magnitudeFor(op, complexity);
+
+  let a, b, text, answer;
+  switch (op) {
+    case 'add': {
+      a = rand(m.min, m.max); b = rand(m.min, m.max);
+      if (tier >= 9 && Math.random() < 0.45) { a = rand(-50, 50); b = rand(-50, 50); }
+      text = fmt(a, true) + ' + ' + fmt(b, false);
+      answer = a + b;
+      break;
+    }
+    case 'sub': {
+      a = rand(m.min, m.max); b = rand(m.min, m.max);
+      if (tier < 9) { if (b > a) [a, b] = [b, a]; }
+      if (tier >= 9 && Math.random() < 0.4) { a = rand(-50, 50); b = rand(-50, 50); }
+      text = fmt(a, true) + ' − ' + fmt(b, false);
+      answer = a - b;
+      break;
+    }
+    case 'mul': {
+      a = rand(m.aMin, m.aMax);
+      b = rand(m.bMin, m.bMax);
+      if (tier >= 9 && Math.random() < 0.3) a = -a;
+      text = fmt(a, true) + ' × ' + fmt(b, false);
+      answer = a * b;
+      break;
+    }
+    case 'div': {
+      const q = rand(m.qMin, m.qMax);
+      const d = rand(m.dMin, m.dMax);
+      a = q * d; b = d; answer = q;
+      if (tier >= 9 && Math.random() < 0.3) { a = -a; answer = -q; }
+      text = fmt(a, true) + ' ÷ ' + fmt(b, false);
+      break;
+    }
+    case 'pow': {
+      a = rand(m.baseMin, m.baseMax);
+      b = pick(m.exps);
+      answer = Math.pow(a, b);
+      text = `${a}^${b}`;
+      break;
+    }
+    case 'alg': {
+      // Practice-mode algebra at a moderate difficulty
+      return genAlgebra(3);
+    }
+  }
+  return { text, answer, op };
+}
+
+// Custom mode: pick from player-selected ops at a fixed number-magnitude difficulty (1-5).
+function genCustomProblem() {
+  const cfg = game.customSetup;
+  const enabled = Object.keys(cfg.ops).filter(o => cfg.ops[o]);
+  if (enabled.length === 0) {
+    const a = rand(1,9), b = rand(1,9);
+    return { text: `${a} + ${b}`, answer: a + b, op: 'add' };
+  }
+  const op = pick(enabled);
+  const diff = clamp(cfg.difficulty || 2, 1, 5);
+
+  if (op === 'alg') return genAlgebra(diff);
+
+  // Number magnitudes per op + difficulty (1=easy, 5=extreme)
+  const addSubMax  = [9, 25, 99, 500, 9999][diff - 1];
+  const mulMaxA    = [9, 9, 12, 25, 99][diff - 1];
+  const mulMaxB    = [9, 9, 12, 12, 12][diff - 1];
+  const powBaseMax = [5, 7, 9, 9, 9][diff - 1];
+
+  let a, b, text, answer;
+  switch (op) {
+    case 'add': {
+      a = rand(1, addSubMax); b = rand(1, addSubMax);
+      text = fmt(a, true) + ' + ' + fmt(b, false);
+      answer = a + b;
+      break;
+    }
+    case 'sub': {
+      a = rand(1, addSubMax); b = rand(1, addSubMax);
+      if (b > a) [a, b] = [b, a];
+      text = fmt(a, true) + ' − ' + fmt(b, false);
+      answer = a - b;
+      break;
+    }
+    case 'mul': {
+      a = rand(2, mulMaxA);
+      b = rand(2, mulMaxB);
+      text = fmt(a, true) + ' × ' + fmt(b, false);
+      answer = a * b;
+      break;
+    }
+    case 'div': {
+      const q = rand(2, mulMaxB);
+      const d = rand(2, mulMaxA);
+      a = q * d; b = d; answer = q;
+      text = fmt(a, true) + ' ÷ ' + fmt(b, false);
+      break;
+    }
+    case 'pow': {
+      a = rand(2, powBaseMax);
+      const exps = diff <= 2 ? [2,2,3] : diff <= 4 ? [2,2,3,3,4] : [2,3,3,4,5];
+      b = pick(exps);
+      answer = Math.pow(a, b);
+      text = `${a}^${b}`;
+      break;
+    }
+  }
+  return { text, answer, op };
+}
+
+// Linear-equation algebra problems: find x.
+// diff 1: a + x = c   diff 2: + sub variant   diff 3: + ax = c   diff 4-5: + ax±b = c
+function genAlgebra(diff) {
+  diff = clamp(diff, 1, 5);
+  const max = [10, 20, 50, 99, 200][diff - 1];
+  const types = diff <= 1 ? ['add'] :
+                diff <= 2 ? ['add', 'sub'] :
+                diff <= 3 ? ['add', 'sub', 'mul'] :
+                            ['add', 'sub', 'mul', 'linear'];
+  const type = pick(types);
+  let text, answer;
+  if (type === 'add') {
+    const x = rand(1, max);
+    const a = rand(1, max);
+    text = `${a} + x = ${a + x}      x =`;
+    answer = x;
+  } else if (type === 'sub') {
+    const x = rand(1, max);
+    const a = x + rand(1, max);
+    text = `${a} − x = ${a - x}      x =`;
+    answer = x;
+  } else if (type === 'mul') {
+    const x = rand(2, Math.min(12, max));
+    const a = rand(2, 9);
+    text = `${a}x = ${a * x}      x =`;
+    answer = x;
+  } else { // linear: ax ± b = c
+    const x = rand(1, 12);
+    const a = rand(2, 5);
+    const b = rand(1, 20);
+    if (Math.random() < 0.7) {
+      text = `${a}x + ${b} = ${a * x + b}      x =`;
+    } else {
+      text = `${a}x − ${b} = ${a * x - b}      x =`;
+    }
+    answer = x;
+  }
+  return { text, answer, op: 'alg', isAlgebra: true, algType: type };
+}
+
+// Mouse position for hover detection on title-screen buttons.
+let mouseX = -1, mouseY = -1;
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = e.clientX - rect.left;
+  mouseY = e.clientY - rect.top;
+  // Pointer cursor when hovering a button or the easter egg.
+  let overInteractive = false;
+  if (game.state === STATES.TITLE) {
+    for (const btn of titleButtons) {
+      if (mouseX >= btn.x && mouseX <= btn.x + btn.w &&
+          mouseY >= btn.y && mouseY <= btn.y + btn.h) { overInteractive = true; break; }
+    }
+    if (!overInteractive && easterEggHitbox) {
+      const eb = easterEggHitbox;
+      if (mouseX >= eb.x && mouseX <= eb.x + eb.w &&
+          mouseY >= eb.y && mouseY <= eb.y + eb.h) overInteractive = true;
+    }
+  }
+  canvas.style.cursor = overInteractive ? 'pointer' : 'default';
+});
+canvas.addEventListener('mouseleave', () => { mouseX = -1; mouseY = -1; canvas.style.cursor = 'default'; });
+
+// Title-screen clickable buttons. Refreshed every frame in drawTitle.
+let titleButtons = [];
+
+// Generic button drawer with hover styling. Returns true if hovered.
+function drawButton(x, y, w, h, label, accent, sublabel) {
+  const hovered = mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h;
+  ctx.save();
+  // Background gradient pill
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  if (hovered) {
+    grad.addColorStop(0, 'rgba(255,255,255,0.22)');
+    grad.addColorStop(1, 'rgba(255,255,255,0.06)');
+  } else {
+    grad.addColorStop(0, 'rgba(255,255,255,0.10)');
+    grad.addColorStop(1, 'rgba(255,255,255,0.02)');
+  }
+  ctx.fillStyle = grad;
+  ctx.strokeStyle = hovered ? accent : 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = hovered ? 2.5 : 1.5;
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = hovered ? 22 : 0;
+  roundRect(x, y, w, h, 14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Label
+  ctx.font = 'bold 17px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = hovered ? accent : '#fff';
+  if (sublabel) {
+    ctx.fillText(label, x + w/2, y + h/2 - 9);
+    ctx.font = '11px "Trebuchet MS"';
+    ctx.fillStyle = hovered ? accent : 'rgba(255,255,255,0.6)';
+    ctx.fillText(sublabel, x + w/2, y + h/2 + 11);
+  } else {
+    ctx.fillText(label, x + w/2, y + h/2);
+  }
+  ctx.restore();
+  return hovered;
+}
+
+// Click / tap handler — checks easter egg, title buttons, or dismisses HELP/RECORDS.
+canvas.addEventListener('click', (e) => {
+  // Click anywhere dismisses Help/Records
+  if (game.state === STATES.HELP || game.state === STATES.RECORDS) {
+    game.state = STATES.TITLE;
+    sfx.type();
+    return;
+  }
+  if (game.state !== STATES.TITLE) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  // Easter egg first
+  if (easterEggHitbox) {
+    const eb = easterEggHitbox;
+    if (x >= eb.x && x <= eb.x + eb.w && y >= eb.y && y <= eb.y + eb.h) {
+      game.state = STATES.EASTER_MESSAGE;
+      sfx.type();
+      return;
+    }
+  }
+  // Then title buttons
+  for (const btn of titleButtons) {
+    if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
+      if (btn.action === 'help')    game.state = STATES.HELP;
+      else if (btn.action === 'records') game.state = STATES.RECORDS;
+      sfx.type();
+      return;
+    }
+  }
+});
+
+// keyup listener — needed for held-key paddle movement during PONG state
+window.addEventListener('keyup', (e) => {
+  if (game.state !== STATES.PONG || !game.pong) return;
+  const k = game.pong.keys;
+  if (e.key === 'w' || e.key === 'W') k.w = false;
+  if (e.key === 's' || e.key === 'S') k.s = false;
+  if (e.key === 'ArrowUp') k.up = false;
+  if (e.key === 'ArrowDown') k.down = false;
+});
+
+// Touch handlers for pong on phone/tablet — left half controls left paddle,
+// right half controls right paddle. Multi-touch supported (one finger per side).
+canvas.addEventListener('touchstart', (e) => {
+  if (game.state !== STATES.PONG || !game.pong) return;
+  e.preventDefault();
+  const p = game.pong;
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    if (x < W/2 && p.touches.left === null) {
+      p.touches.left = { id: t.identifier, y };
+    } else if (x >= W/2 && p.touches.right === null) {
+      p.touches.right = { id: t.identifier, y };
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  if (game.state !== STATES.PONG || !game.pong) return;
+  e.preventDefault();
+  const p = game.pong;
+  for (const t of e.changedTouches) {
+    if (p.touches.left && t.identifier === p.touches.left.id) p.touches.left.y = t.clientY;
+    if (p.touches.right && t.identifier === p.touches.right.id) p.touches.right.y = t.clientY;
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  if (game.state !== STATES.PONG || !game.pong) return;
+  const p = game.pong;
+  for (const t of e.changedTouches) {
+    if (p.touches.left && t.identifier === p.touches.left.id) p.touches.left = null;
+    if (p.touches.right && t.identifier === p.touches.right.id) p.touches.right = null;
+  }
+});
+canvas.addEventListener('touchcancel', (e) => {
+  if (game.state !== STATES.PONG || !game.pong) return;
+  game.pong.touches.left = null;
+  game.pong.touches.right = null;
+});
+
+window.addEventListener('keydown', (e) => {
+  ensureAudio();
+  if (e.key === 'F11') return;
+
+  // Mute toggle (works any state)
+  if (e.key === 'm' || e.key === 'M') {
+    store.muted = !store.muted;
+    saveStore();
+    e.preventDefault();
+    return;
+  }
+
+  // Pause toggle (only during PROBLEM)
+  if ((e.key === 'p' || e.key === 'P') && game.state === STATES.PROBLEM) {
+    togglePause();
+    e.preventDefault();
+    return;
+  }
+
+  // While paused: Q (or Escape) bails out to the main menu so player can change
+  // mode, names, difficulty, etc.
+  if (game.paused && (e.key === 'q' || e.key === 'Q' || e.key === 'Escape')) {
+    game.paused = false;
+    game.state = STATES.TITLE;
+    e.preventDefault();
+    return;
+  }
+
+  // Escape during practice/custom gameplay → bail to title
+  if (e.key === 'Escape' &&
+      (game.mode === 'practice' || game.mode === 'custom') &&
+      (game.state === STATES.PROBLEM || game.state === STATES.RESULT || game.state === STATES.BALL)) {
+    game.state = STATES.TITLE;
+    game.paused = false;
+    e.preventDefault();
+    return;
+  }
+
+  // === TITLE ===
+  if (game.state === STATES.TITLE) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault();
+      if (game.mode === 'practice') {
+        game.state = STATES.PRACTICE_MENU;
+      } else if (game.mode === 'custom') {
+        game.state = STATES.CUSTOM_SETUP;
+        game.customSetup.customMenuCursor = 0;
+      } else if (game.mode === 'versus2p' && namesAreDefault()) {
+        // Force name entry before a 2-player match so head-to-head + catch
+        // phrases work. Pre-fill TREY / MIMI as suggestions — Enter twice if
+        // those are right, or backspace + type to change.
+        game.state = STATES.NAME_ENTRY;
+        game.nameEntry = {
+          side: 'left',
+          text: store.names.left === 'PLAYER 1' ? 'TREY' : store.names.left,
+          thenAction: 'startGame',
+          suggested: true,
+        };
+      } else {
+        startGame();
+      }
+    } else if (e.key === 'ArrowLeft') {
+      diffIdx = (diffIdx + DIFF_KEYS.length - 1) % DIFF_KEYS.length;
+      sfx.type();
+      e.preventDefault();
+    } else if (e.key === 'ArrowRight') {
+      diffIdx = (diffIdx + 1) % DIFF_KEYS.length;
+      sfx.type();
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const modes = ['versus2p', 'versus1p', 'practice', 'custom'];
+      const i = modes.indexOf(game.mode);
+      const next = (i + (e.key === 'ArrowDown' ? 1 : modes.length - 1)) % modes.length;
+      game.mode = modes[next];
+      updatePaddleNames();
+      sfx.type();
+      e.preventDefault();
+    } else if (e.key === 'n' || e.key === 'N') {
+      game.state = STATES.NAME_ENTRY;
+      game.nameEntry = { side: 'left', text: store.names.left };
+      e.preventDefault();
+    } else if (e.key === 'c' || e.key === 'C') {
+      // Toggle multiple-choice input mode (composes with any game mode)
+      game.multiChoice = !game.multiChoice;
+      store.multiChoice = game.multiChoice;
+      saveStore();
+      sfx.type();
+      e.preventDefault();
+    } else if (e.key === 'e' || e.key === 'E') {
+      // Easter egg — show the love note then route to standalone Pong.
+      game.state = STATES.EASTER_MESSAGE;
+      sfx.type();
+      e.preventDefault();
+    }
+    return;
+  }
+
+  // === EASTER MESSAGE ===
+  if (game.state === STATES.EASTER_MESSAGE) {
+    if (e.key === ' ' || e.key === 'Enter') {
+      startPongStandalone();
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      game.state = STATES.TITLE;
+      e.preventDefault();
+    }
+    return;
+  }
+
+  // === HELP / RECORDS — any key (or click anywhere) returns to title ===
+  if (game.state === STATES.HELP || game.state === STATES.RECORDS) {
+    if (e.key === 'Escape' || e.key === ' ' || e.key === 'Enter' ||
+        e.key === 'Backspace' || e.key === 'h' || e.key === 'H' ||
+        e.key === 'r' || e.key === 'R') {
+      game.state = STATES.TITLE;
+      e.preventDefault();
+    }
+    return;
+  }
+
+  // === PONG INTERLUDE ===
+  if (game.state === STATES.PONG) {
+    if (!game.pong) return;
+    const k = game.pong.keys;
+    if (e.key === 'w' || e.key === 'W') { k.w = true; e.preventDefault(); return; }
+    if (e.key === 's' || e.key === 'S') { k.s = true; e.preventDefault(); return; }
+    if (e.key === 'ArrowUp')             { k.up = true; e.preventDefault(); return; }
+    if (e.key === 'ArrowDown')           { k.down = true; e.preventDefault(); return; }
+    if (e.key === 'Escape') {
+      // Bail out of the whole match
+      game.pong = null;
+      game.state = STATES.TITLE;
+      e.preventDefault();
+      return;
+    }
+    return;
+  }
+
+  // === GAME OVER ===
+  if (game.state === STATES.GAME_OVER) {
+    if (e.key === ' ' || e.key === 'Enter' || e.key === 'Escape') {
+      e.preventDefault();
+      game.state = STATES.TITLE;
+    }
+    return;
+  }
+
+  // === NAME ENTRY ===
+  if (game.state === STATES.NAME_ENTRY) {
+    handleNameEntryKey(e);
+    return;
+  }
+
+  // === PRACTICE MENU ===
+  if (game.state === STATES.PRACTICE_MENU) {
+    handlePracticeMenuKey(e);
+    return;
+  }
+
+  // === CUSTOM SETUP ===
+  if (game.state === STATES.CUSTOM_SETUP) {
+    handleCustomSetupKey(e);
+    return;
+  }
+
+  // === PROBLEM (player typing) ===
+  if (game.state !== STATES.PROBLEM) return;
+  if (game.paused) return;
+  const cur = game.current;
+  if (!cur || cur.submitted) return;
+
+  // 1P mode: keys ignored on CPU's turn (right side)
+  if (game.mode === 'versus1p' && cur.side === 'right') return;
+
+  // Multi-choice mode: 1-4 picks one of the four choices, no other keys.
+  if (cur.problem.choices) {
+    if (/^[1-4]$/.test(e.key)) {
+      const idx = parseInt(e.key, 10) - 1;
+      if (idx < cur.problem.choices.length) {
+        cur.typed = String(cur.problem.choices[idx]);
+        sfx.type();
+        submitAnswer();
+      }
+      e.preventDefault();
+    }
+    return;
+  }
+
+  if (/^[0-9]$/.test(e.key)) {
+    if (cur.typed.length < 8) { cur.typed += e.key; sfx.type(); checkAutoSubmit(); }
+    e.preventDefault();
+  } else if (e.key === '-' || e.key === '_') {
+    if (cur.typed.length === 0) { cur.typed = '-'; sfx.type(); }
+    e.preventDefault();
+  } else if (e.key === 'Backspace') {
+    cur.typed = cur.typed.slice(0, -1);
+    e.preventDefault();
+  } else if (e.key === 'Enter') {
+    submitAnswer();
+    e.preventDefault();
+  }
+});
+
+function handleNameEntryKey(e) {
+  const ne = game.nameEntry;
+  if (e.key === 'Enter') {
+    const trimmed = ne.text.trim().slice(0, 12).toUpperCase();
+    const fallback = ne.side === 'left' ? 'PLAYER 1' : 'PLAYER 2';
+    store.names[ne.side] = trimmed || fallback;
+    if (ne.side === 'left') {
+      ne.side = 'right';
+      // Suggested-flow: prefill MIMI on right if it's still default; otherwise use existing.
+      if (ne.suggested && store.names.right === 'PLAYER 2') {
+        ne.text = 'MIMI';
+      } else {
+        ne.text = store.names.right;
+      }
+    } else {
+      saveStore();
+      updatePaddleNames();
+      // Either start the game (when name entry was forced before a 2P match)
+      // or return to title (when the user chose to rename via N).
+      if (ne.thenAction === 'startGame') {
+        startGame();
+      } else {
+        game.state = STATES.TITLE;
+      }
+    }
+    sfx.type();
+    e.preventDefault();
+  } else if (e.key === 'Escape') {
+    game.state = STATES.TITLE;
+    e.preventDefault();
+  } else if (e.key === 'Backspace') {
+    ne.text = ne.text.slice(0, -1);
+    e.preventDefault();
+  } else if (e.key === ' ' && ne.text.length < 12) {
+    ne.text += ' ';
+    e.preventDefault();
+  } else if (e.key.length === 1 && ne.text.length < 12 && /^[a-zA-Z0-9_-]$/.test(e.key)) {
+    ne.text += e.key.toUpperCase();
+    sfx.type();
+    e.preventDefault();
+  }
+}
+
+function handlePracticeMenuKey(e) {
+  if (e.key === 'ArrowLeft') {
+    const i = PRACTICE_OPS.indexOf(game.practiceOp);
+    game.practiceOp = PRACTICE_OPS[(i + PRACTICE_OPS.length - 1) % PRACTICE_OPS.length];
+    sfx.type(); e.preventDefault();
+  } else if (e.key === 'ArrowRight') {
+    const i = PRACTICE_OPS.indexOf(game.practiceOp);
+    game.practiceOp = PRACTICE_OPS[(i + 1) % PRACTICE_OPS.length];
+    sfx.type(); e.preventDefault();
+  } else if (e.key === ' ' || e.key === 'Enter') {
+    startPractice();
+    e.preventDefault();
+  } else if (e.key === 'Escape') {
+    game.state = STATES.TITLE;
+    e.preventDefault();
+  }
+}
+
+function handleCustomSetupKey(e) {
+  const cs = game.customSetup;
+  if (e.key === 'Escape') {
+    game.state = STATES.TITLE;
+    e.preventDefault();
+    return;
+  }
+  if (e.key === ' ' || e.key === 'Enter') {
+    // Need at least one op selected
+    const enabled = CUSTOM_OPS_ORDER.filter(o => cs.ops[o]);
+    if (enabled.length > 0) {
+      persistCustomSetup();
+      startCustom();
+    } else {
+      game.toast = { text: 'PICK AT LEAST ONE OP', t: 1.4, color: '#ff7755' };
+    }
+    e.preventDefault();
+    return;
+  }
+  // Number keys 1-6 toggle ops
+  if (/^[1-6]$/.test(e.key)) {
+    const idx = parseInt(e.key, 10) - 1;
+    const op = CUSTOM_OPS_ORDER[idx];
+    cs.ops[op] = !cs.ops[op];
+    sfx.type();
+    e.preventDefault();
+    return;
+  }
+  // ◀ ▶ adjusts difficulty 1-5
+  if (e.key === 'ArrowLeft') {
+    cs.difficulty = clamp((cs.difficulty || 2) - 1, 1, 5);
+    sfx.type(); e.preventDefault();
+  } else if (e.key === 'ArrowRight') {
+    cs.difficulty = clamp((cs.difficulty || 2) + 1, 1, 5);
+    sfx.type(); e.preventDefault();
+  }
+}
+
+function togglePause() {
+  if (game.state !== STATES.PROBLEM) return;
+  if (game.paused) {
+    const dur = performance.now() - game.pauseStart;
+    if (game.current) game.current.startTime += dur;
+    game.paused = false;
+  } else {
+    game.paused = true;
+    game.pauseStart = performance.now();
+  }
+}
+
+// First user gesture unlocks audio on some browsers.
+window.addEventListener('pointerdown', ensureAudio, { once: false });
+
+function checkAutoSubmit() {
+  const cur = game.current;
+  if (!cur) return;
+  const expected = String(cur.problem.answer);
+  if (cur.typed === expected) submitAnswer();
+}
+
+function submitAnswer() {
+  const cur = game.current;
+  if (!cur || cur.submitted) return;
+  cur.submitted = true;
+  const userAnswer = parseInt(cur.typed, 10);
+  const correct = !isNaN(userAnswer) && userAnswer === cur.problem.answer;
+  const used = (performance.now() - cur.startTime) / 1000;
+  cur.timeUsed = clamp(used, 0.3, cur.timeLimit);
+  if (correct) onCorrect();
+  else onWrong(false, isNaN(userAnswer) ? null : userAnswer);
+}
+
+function onCorrect() {
+  const cur = game.current;
+  game.totalCorrect++;
+  store.stats.totalSolved = (store.stats.totalSolved || 0) + 1;
+
+  // Modest weak-spot decay on correct answer (so it self-heals)
+  if (store.stats.weakSpots[cur.problem.op]) {
+    store.stats.weakSpots[cur.problem.op] = Math.max(0, store.stats.weakSpots[cur.problem.op] - 0.5);
+  }
+
+  const tier = difficultyTier();
+  if (tier !== game.prevTier) {
+    game.prevTier = tier;
+    // Custom mode: difficulty is player-controlled, suppress level chatter.
+    if (game.mode !== 'custom') {
+      const newOp = tierIntroducesOp(tier);
+      if (newOp && game.mode !== 'practice') {
+        // A fresh op just unlocked. Lock the next several rounds to it so the
+        // player actually gets to drill what they earned.
+        game.recentlyUnlockedOp = newOp;
+        game.recentlyUnlockedRemaining = 5;
+        game.toast = { text: opUnlockText(newOp), t: 2.4, color: '#7fff90' };
+      } else {
+        game.toast = { text: 'LEVEL ' + tier + '   ' + tierName(tier), t: 1.8, color: '#ffe066' };
+      }
+      sfx.level();
+    }
+  }
+  const side = cur.side;
+  game.streak[side]++;
+  game.matchBestStreak = Math.max(game.matchBestStreak, game.streak[side]);
+  store.stats.bestStreak = Math.max(store.stats.bestStreak || 0, game.streak[side]);
+  saveStore();
+
+  game.lastTimeUsed = cur.timeUsed;
+  game.lastTimeLimit = cur.timeLimit;
+  sfx.correct();
+
+  const paddle = side === 'left' ? game.paddleL : game.paddleR;
+  paddle.pulse = 1;
+  paddle.y = clamp(game.ball.y - paddle.h/2, 8, H - paddle.h - 8);
+  const hitX = side === 'left' ? paddle.x + paddle.w : paddle.x;
+  spawnHitParticles(hitX, paddle.y + paddle.h/2, side === 'left' ? '#56e2ff' : '#ff7ad8');
+  game.flash = { color: side === 'left' ? '#56e2ff' : '#ff7ad8', a: 0.35 };
+  game.shake = { mag: 8, t: 0.25 };
+
+  if (game.streak[side] >= 5 && game.streak[side] % 5 === 0) triggerSpectacle(side);
+
+  // Practice mode: no opponent, brief pause then next problem
+  if (game.mode === 'practice') {
+    game.ball.travel = null;
+    game.state = STATES.RESULT;
+    game.stateTimer = 0.5;
+    return;
+  }
+
+  const fromX = side === 'left' ? paddle.x + paddle.w + game.ball.r : paddle.x - game.ball.r;
+  const oppPaddle = side === 'left' ? game.paddleR : game.paddleL;
+  const toX   = side === 'left' ? oppPaddle.x - game.ball.r : oppPaddle.x + oppPaddle.w + game.ball.r;
+  const ballDur = clamp(cur.timeUsed * 0.55 + 0.4, 0.55, 2.2);
+  game.ball.travel = {
+    fromX, fromY: paddle.y + paddle.h/2,
+    toX, toY: H/2 + randF(-H*0.18, H*0.18),
+    duration: ballDur,
+    elapsed: 0,
+  };
+  game.ball.x = fromX;
+  game.ball.y = paddle.y + paddle.h/2;
+  game.ball.color = side === 'left' ? '#9ee9ff' : '#ffb0e8';
+  game.state = STATES.BALL;
+}
+
+function onWrong(timedOut, userAnswer) {
+  const cur = game.current;
+  const side = cur.side;
+  const opponent = side === 'left' ? 'right' : 'left';
+
+  // Track weak spot (per operation type)
+  store.stats.weakSpots[cur.problem.op] = (store.stats.weakSpots[cur.problem.op] || 0) + 1;
+  saveStore();
+
+  // Build the teaching toast: prefix + the equation with the correct answer.
+  const ans = cur.problem.answer;
+  const eqLine = `${cur.problem.text} = ${ans}`;
+  let prefix;
+  if (timedOut) {
+    prefix = 'TIME!';
+  } else if (userAnswer != null) {
+    const diff = Math.abs(userAnswer - ans);
+    if (diff === 1) prefix = 'OFF BY 1!';
+    else if (diff === 10) prefix = 'OFF BY 10!';
+    else if (diff === 100) prefix = 'OFF BY 100!';
+    else if (userAnswer === -ans) prefix = 'WRONG SIGN!';
+    else prefix = 'OOPS!';
+  } else {
+    prefix = 'OOPS!';
+  }
+
+  game.streak[side] = 0;
+  game.lastTimeUsed = null;
+  game.lastTimeLimit = null;
+  if (side === 'left') game.paddleL.vibe = 1; else game.paddleR.vibe = 1;
+  sfx.wrong();
+  game.flash = { color: '#ff3344', a: 0.55 };
+  game.shake = { mag: 22, t: 0.55 };
+  game.toast = { text: prefix + '   ' + eqLine, t: 2.6, color: '#ff7755' };
+
+  // Practice mode: no scoring, just continue after a beat
+  if (game.mode === 'practice') {
+    game.ball.travel = null;
+    game.state = STATES.RESULT;
+    game.stateTimer = 2.2;
+    return;
+  }
+
+  // Versus: opponent scores
+  game.score[opponent]++;
+
+  const paddle = side === 'left' ? game.paddleL : game.paddleR;
+  const fromX = W * 0.5;
+  const toX = side === 'left' ? -80 : W + 80;
+  game.ball.travel = {
+    fromX, fromY: paddle.y + paddle.h/2,
+    toX, toY: paddle.y + paddle.h/2 + randF(-40, 40),
+    duration: 0.8, elapsed: 0,
+  };
+  game.ball.x = fromX;
+  game.ball.y = paddle.y + paddle.h/2;
+  game.ball.color = '#ff5577';
+  game.state = STATES.RESULT;
+  game.stateTimer = 2.4; // longer than before so the equation toast lands
+
+  if (game.score.left >= WIN_SCORE || game.score.right >= WIN_SCORE) {
+    game.winnerSide = game.score.left >= WIN_SCORE ? 'left' : 'right';
+    store.stats.gamesPlayed = (store.stats.gamesPlayed || 0) + 1;
+    // H2H: record this match's winner→loser pair (skipped if either is a default name).
+    const winnerName = game.winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
+    const loserName  = game.winnerSide === 'left' ? game.paddleR.name : game.paddleL.name;
+    recordResult(winnerName, loserName);
+    saveStore();
+  }
+}
+
+function startGame() {
+  game.score = { left: 0, right: 0 };
+  game.streak = { left: 0, right: 0 };
+  game.totalCorrect = 0;
+  game.matchBestStreak = 0;
+  game.prevTier = 1;
+  game.lastTimeUsed = null;
+  game.lastTimeLimit = null;
+  game.winnerSide = null;
+  game.recentlyUnlockedOp = null;
+  game.recentlyUnlockedRemaining = 0;
+  game.pongFiredThisMatch = false;
+  game.pong = null;
+  // recentProblems is intentionally NOT reset — it's a rolling, persistent
+  // buffer (see store.recentProblems) so variety holds across matches and
+  // sessions, not just within a single match.
+  game.toast = { text: 'LEVEL 1   +', t: 1.4, color: '#ffe066' };
+  updatePaddleNames();
+  startRound(Math.random() < 0.5 ? 'left' : 'right');
+}
+
+function startPractice() {
+  game.score = { left: 0, right: 0 };
+  game.streak = { left: 0, right: 0 };
+  game.totalCorrect = 0;
+  game.matchBestStreak = 0;
+  game.prevTier = 1;
+  game.lastTimeUsed = null;
+  game.lastTimeLimit = null;
+  game.winnerSide = null;
+  game.recentlyUnlockedOp = null;
+  game.recentlyUnlockedRemaining = 0;
+  game.pongFiredThisMatch = false;
+  game.pong = null;
+  // recentProblems is intentionally NOT reset — it's a rolling, persistent
+  // buffer (see store.recentProblems) so variety holds across matches and
+  // sessions, not just within a single match.
+  game.toast = { text: 'PRACTICE: ' + PRACTICE_OP_LABELS[game.practiceOp], t: 2.0, color: '#ffe066' };
+  updatePaddleNames();
+  startRound('left'); // human always serves in practice
+}
+
+function startCustom() {
+  game.score = { left: 0, right: 0 };
+  game.streak = { left: 0, right: 0 };
+  game.totalCorrect = 0;
+  game.matchBestStreak = 0;
+  game.prevTier = 1;
+  game.lastTimeUsed = null;
+  game.lastTimeLimit = null;
+  game.winnerSide = null;
+  game.recentlyUnlockedOp = null;
+  game.recentlyUnlockedRemaining = 0;
+  game.pongFiredThisMatch = false;
+  game.pong = null;
+  // recentProblems is intentionally NOT reset — it's a rolling, persistent
+  // buffer (see store.recentProblems) so variety holds across matches and
+  // sessions, not just within a single match.
+  const enabled = CUSTOM_OPS_ORDER.filter(o => game.customSetup.ops[o]);
+  const opSummary = enabled.map(o => ({add:'+',sub:'−',mul:'×',div:'÷',pow:'^',alg:'x'})[o]).join(' ');
+  game.toast = { text: 'CUSTOM   ' + opSummary + '   D' + game.customSetup.difficulty, t: 2.0, color: '#7fff90' };
+  updatePaddleNames();
+  startRound('left');
+}
+
+function startRound(side) {
+  const paddle = side === 'left' ? game.paddleL : game.paddleR;
+  game.ball.x = paddle.x + (side === 'left' ? paddle.w + game.ball.r : -game.ball.r);
+  game.ball.y = paddle.y + paddle.h/2;
+
+  // Generate a problem, retrying up to 10 times to avoid repeating any of the
+  // last 50 problems (rolling, persistent across sessions). At small ranges
+  // (e.g. 1-9 add) this is what prevents seeing "5+7" repeatedly across plays.
+  const opOverride = game.mode === 'practice' ? game.practiceOp : null;
+  let problem;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    problem = genProblem(false, opOverride);
+    if (game.recentProblems.indexOf(problem.text) === -1) break;
+  }
+  game.recentProblems.push(problem.text);
+  if (game.recentProblems.length > 50) game.recentProblems.shift();
+  // Persist so variety holds across browser sessions.
+  store.recentProblems = game.recentProblems;
+  saveStore();
+
+  // If multi-choice mode is on, attach 4 choices to the problem.
+  if (game.multiChoice) attachChoices(problem);
+  let timeLimit;
+  if (game.lastTimeUsed != null && game.lastTimeLimit != null) {
+    timeLimit = nextTimeLimit(game.lastTimeUsed, game.lastTimeLimit, problem);
+  } else {
+    // First problem of a match: start at the mode's max plus any thinking bonus.
+    timeLimit = curDiff().maxTime + thinkingBonus(problem);
+  }
+
+  game.current = {
+    side,
+    problem,
+    typed: '',
+    timeLimit,
+    timeRemaining: 0,
+    startTime: performance.now(),
+    submitted: false,
+    timeUsed: 0,
+  };
+  game.state = STATES.PROBLEM;
+
+  // CPU thinking setup if it's the bot's turn
+  if (game.mode === 'versus1p' && side === 'right') {
+    setupCPU(timeLimit);
+  } else {
+    game.cpu.thinking = false;
+  }
+}
+
+function setupCPU(timeLimit) {
+  const cfg = curDiff().cpu;
+  // Soft bell-ish wobble: average of two uniforms in [-1,1]
+  const wobble = (Math.random() + Math.random() - 1) * cfg.thinkStd;
+  const target = clamp(cfg.thinkAvg + wobble, 0.5, timeLimit - 0.25);
+  const willMiss = Math.random() > cfg.accuracy;
+  const missAmount = willMiss ? pick([1, -1, 10, -10]) : 0;
+  game.cpu = { thinking: true, target, elapsed: 0, willMiss, missAmount };
+}
+
+// Build 4 multiple-choice options around a problem's correct answer.
+// Distractors are plausible-but-wrong (off-by-1, off-by-10, adjacent products,
+// sign flip, etc.) so the right answer doesn't stand out.
+function attachChoices(problem) {
+  const correct = problem.answer;
+  const op = problem.op;
+  const candidates = new Set();
+
+  if (op === 'mul' || op === 'div') {
+    candidates.add(correct + 1);
+    candidates.add(correct - 1);
+    if (Math.abs(correct) >= 10) {
+      const step = Math.max(2, Math.round(Math.abs(correct) * 0.12));
+      candidates.add(correct + step);
+      candidates.add(correct - step);
+    }
+    candidates.add(correct + 5);
+    candidates.add(correct - 5);
+  } else if (op === 'add' || op === 'sub') {
+    candidates.add(correct + 1);
+    candidates.add(correct - 1);
+    candidates.add(correct + 10);
+    candidates.add(correct - 10);
+    if (Math.abs(correct) > 100) {
+      candidates.add(correct + 100);
+      candidates.add(correct - 100);
+    }
+    candidates.add(correct + Math.max(2, Math.floor(Math.abs(correct) * 0.1)));
+  } else if (op === 'pow') {
+    candidates.add(correct + 1);
+    candidates.add(correct - 1);
+    candidates.add(Math.max(1, Math.round(correct * 0.6)));
+    candidates.add(Math.round(correct * 1.4));
+    candidates.add(correct * 2);
+  } else if (op === 'alg') {
+    candidates.add(correct + 1);
+    candidates.add(correct - 1);
+    candidates.add(correct + 2);
+    candidates.add(correct - 2);
+    candidates.add(-correct);
+    candidates.add(correct * 2);
+  } else {
+    candidates.add(correct + 1);
+    candidates.add(correct - 1);
+    candidates.add(correct + 10);
+    candidates.add(correct - 10);
+  }
+
+  candidates.delete(correct);
+  let arr = [...candidates].filter(d => Number.isFinite(d) && d !== correct);
+
+  // Shuffle
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  let picks = arr.slice(0, 3);
+
+  // Fallback: fill any remaining slots with random small offsets
+  while (picks.length < 3) {
+    const offset = (Math.random() < 0.5 ? 1 : -1) * (Math.floor(Math.random() * 9) + 1);
+    const c = correct + offset;
+    if (c !== correct && picks.indexOf(c) === -1) picks.push(c);
+  }
+
+  // Combine with correct, shuffle final positions
+  const all = [correct, ...picks];
+  for (let i = all.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [all[i], all[j]] = [all[j], all[i]];
+  }
+
+  problem.choices = all;
+  problem.correctIndex = all.indexOf(correct);
+  return problem;
+}
+
+function pickWrongChoiceIndex(problem) {
+  const wrongIdxs = [];
+  for (let i = 0; i < problem.choices.length; i++) {
+    if (i !== problem.correctIndex) wrongIdxs.push(i);
+  }
+  return pick(wrongIdxs);
+}
+
+// === PONG INTERLUDE ===========================================================
+
+function startPongInterlude(opts) {
+  opts = opts || {};
+  game.pong = {
+    scoreL: 0,
+    scoreR: 0,
+    paddleL: { y: H/2 - PONG.PADDLE_H/2, targetY: H/2 - PONG.PADDLE_H/2 },
+    paddleR: { y: H/2 - PONG.PADDLE_H/2, targetY: H/2 - PONG.PADDLE_H/2 },
+    ball: { x: W/2, y: H/2, dx: 0, dy: 0 },
+    serveCountdown: PONG.SERVE_COUNTDOWN,
+    winnerSide: null,
+    endCountdown: null,
+    nextMathSide: opts.nextMathSide || null,          // null for standalone
+    standalone: !!opts.standalone,
+    winScore: opts.winScore || PONG.WIN_SCORE,
+    keys: { w: false, s: false, up: false, down: false },
+    touches: { left: null, right: null },
+    intro: 1.6,
+  };
+  pongStartServe(Math.random() < 0.5 ? 'left' : 'right');
+  game.state = STATES.PONG;
+  game.toast = {
+    text: opts.standalone ? 'PURE PONG' : 'PONG TIME!',
+    t: 1.4,
+    color: '#7fff90'
+  };
+  if (!store.muted) sfx.level();
+}
+
+function startPongStandalone() {
+  // Longer game when it's the whole thing, not an interlude.
+  startPongInterlude({ standalone: true, winScore: 7 });
+}
+
+function pongStartServe(servingSide) {
+  const p = game.pong;
+  p.ball.x = W/2;
+  p.ball.y = H/2 + randF(-60, 60);
+  // Ball goes toward the OPPONENT of the server (server hit it across).
+  const dirX = servingSide === 'left' ? 1 : -1;
+  const angle = randF(-0.35, 0.35);
+  const speed = PONG.BALL_INIT_SPEED;
+  p.ball.dx = dirX * speed * Math.cos(angle);
+  p.ball.dy = speed * Math.sin(angle);
+  p.serveCountdown = PONG.SERVE_COUNTDOWN;
+}
+
+function pongPaddleHit(side, ballY, paddleY) {
+  // offset is -1 (top of paddle) to +1 (bottom). Adds vertical angle.
+  const offset = (ballY - (paddleY + PONG.PADDLE_H/2)) / (PONG.PADDLE_H/2);
+  const p = game.pong;
+  // Reflect dx and accelerate
+  p.ball.dx = (side === 'left' ? 1 : -1) * Math.abs(p.ball.dx) * PONG.BALL_ACCEL;
+  // Add vertical influence from where on paddle hit
+  p.ball.dy += offset * 280;
+  // Cap total speed
+  const sp = Math.hypot(p.ball.dx, p.ball.dy);
+  if (sp > PONG.BALL_MAX_SPEED) {
+    const k = PONG.BALL_MAX_SPEED / sp;
+    p.ball.dx *= k;
+    p.ball.dy *= k;
+  }
+  sfx.hit();
+}
+
+function pongFinish(winnerSide) {
+  const p = game.pong;
+  p.winnerSide = winnerSide;
+  p.endCountdown = PONG.END_HOLD;
+  p.ball.dx = 0; p.ball.dy = 0;
+  const winnerName = winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
+  game.toast = {
+    text: winnerName + ' WINS THE INTERLUDE!',
+    t: 2.5,
+    color: winnerSide === 'left' ? '#56e2ff' : '#ff7ad8'
+  };
+  game.flash = { color: '#fff', a: 0.6 };
+  game.shake = { mag: 18, t: 0.5 };
+  if (!store.muted) sfx.score();
+}
+
+function updatePong(dt) {
+  const p = game.pong;
+  if (!p) return;
+  // Intro grace period: paddles move but ball waits
+  if (p.intro > 0) p.intro -= dt;
+
+  // === Paddle target from input ===
+  // Left paddle: W up, S down, or touch on left half
+  if (p.touches.left) {
+    p.paddleL.targetY = clamp(p.touches.left.y - PONG.PADDLE_H/2, 4, H - PONG.PADDLE_H - 4);
+  } else {
+    let m = 0;
+    if (p.keys.w) m -= 1;
+    if (p.keys.s) m += 1;
+    p.paddleL.targetY = clamp(p.paddleL.targetY + m * PONG.PADDLE_SPEED * dt, 4, H - PONG.PADDLE_H - 4);
+  }
+  if (p.touches.right) {
+    p.paddleR.targetY = clamp(p.touches.right.y - PONG.PADDLE_H/2, 4, H - PONG.PADDLE_H - 4);
+  } else {
+    let m = 0;
+    if (p.keys.up) m -= 1;
+    if (p.keys.down) m += 1;
+    p.paddleR.targetY = clamp(p.paddleR.targetY + m * PONG.PADDLE_SPEED * dt, 4, H - PONG.PADDLE_H - 4);
+  }
+  // Smooth paddle motion (snappy but not instant)
+  p.paddleL.y = lerp(p.paddleL.y, p.paddleL.targetY, 1 - Math.exp(-22 * dt));
+  p.paddleR.y = lerp(p.paddleR.y, p.paddleR.targetY, 1 - Math.exp(-22 * dt));
+
+  // === End-of-match wait ===
+  if (p.endCountdown !== null) {
+    p.endCountdown -= dt;
+    if (p.endCountdown <= 0) {
+      if (p.standalone) {
+        // Standalone Pong (easter egg) — return to title screen, no math match.
+        game.pong = null;
+        game.state = STATES.TITLE;
+      } else {
+        // Interlude — math match resumes from where we left off.
+        const nextSide = p.nextMathSide;
+        game.pong = null;
+        startRound(nextSide);
+      }
+    }
+    return;
+  }
+
+  // === Serve countdown — ball doesn't move yet ===
+  if (p.serveCountdown > 0 || p.intro > 0) {
+    p.serveCountdown -= dt;
+    return;
+  }
+
+  // === Ball physics ===
+  p.ball.x += p.ball.dx * dt;
+  p.ball.y += p.ball.dy * dt;
+
+  // Top/bottom wall bounces
+  if (p.ball.y - PONG.BALL_R < 0) {
+    p.ball.y = PONG.BALL_R;
+    p.ball.dy = Math.abs(p.ball.dy);
+    if (!store.muted) beep(440, 0.04, 'square', 0.10);
+  } else if (p.ball.y + PONG.BALL_R > H) {
+    p.ball.y = H - PONG.BALL_R;
+    p.ball.dy = -Math.abs(p.ball.dy);
+    if (!store.muted) beep(440, 0.04, 'square', 0.10);
+  }
+
+  // Paddle collisions
+  const lpx = 40, lpw = PONG.PADDLE_W;
+  const rpx = W - 40 - PONG.PADDLE_W, rpw = PONG.PADDLE_W;
+
+  if (p.ball.dx < 0 &&
+      p.ball.x - PONG.BALL_R <= lpx + lpw &&
+      p.ball.x - PONG.BALL_R >= lpx - 30 &&  // narrow tolerance to avoid clipping past
+      p.ball.y >= p.paddleL.y - 4 &&
+      p.ball.y <= p.paddleL.y + PONG.PADDLE_H + 4) {
+    p.ball.x = lpx + lpw + PONG.BALL_R;
+    pongPaddleHit('left', p.ball.y, p.paddleL.y);
+  } else if (p.ball.dx > 0 &&
+             p.ball.x + PONG.BALL_R >= rpx &&
+             p.ball.x + PONG.BALL_R <= rpx + rpw + 30 &&
+             p.ball.y >= p.paddleR.y - 4 &&
+             p.ball.y <= p.paddleR.y + PONG.PADDLE_H + 4) {
+    p.ball.x = rpx - PONG.BALL_R;
+    pongPaddleHit('right', p.ball.y, p.paddleR.y);
+  }
+
+  // Goals
+  if (p.ball.x < -PONG.BALL_R) {
+    p.scoreR++;
+    if (!store.muted) sfx.score();
+    if (p.scoreR >= p.winScore) {
+      pongFinish('right');
+    } else {
+      pongStartServe('right');
+    }
+  } else if (p.ball.x > W + PONG.BALL_R) {
+    p.scoreL++;
+    if (!store.muted) sfx.score();
+    if (p.scoreL >= p.winScore) {
+      pongFinish('left');
+    } else {
+      pongStartServe('left');
+    }
+  }
+}
+
+function drawPong() {
+  const p = game.pong;
+  if (!p) return;
+
+  // Court background — slightly different vibe than math game
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0a0a25');
+  g.addColorStop(1, '#000814');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Center line
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 3;
+  ctx.setLineDash([14, 18]);
+  ctx.beginPath();
+  ctx.moveTo(W/2, 0);
+  ctx.lineTo(W/2, H);
+  ctx.stroke();
+  ctx.restore();
+
+  // Paddles
+  ctx.save();
+  ctx.fillStyle = '#56e2ff';
+  ctx.shadowColor = '#56e2ff';
+  ctx.shadowBlur = 18;
+  roundRect(40, p.paddleL.y, PONG.PADDLE_W, PONG.PADDLE_H, 6);
+  ctx.fill();
+  ctx.fillStyle = '#ff7ad8';
+  ctx.shadowColor = '#ff7ad8';
+  roundRect(W - 40 - PONG.PADDLE_W, p.paddleR.y, PONG.PADDLE_W, PONG.PADDLE_H, 6);
+  ctx.fill();
+  ctx.restore();
+
+  // Ball (only visible after intro & serve countdown done, but we'll always draw position-based)
+  if (p.intro <= 0) {
+    ctx.save();
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 24;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(p.ball.x, p.ball.y, PONG.BALL_R, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Scores top-center
+  ctx.save();
+  ctx.font = 'bold 88px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.shadowColor = '#56e2ff';
+  ctx.shadowBlur = 18;
+  ctx.fillStyle = '#56e2ff';
+  ctx.textAlign = 'right';
+  ctx.fillText(String(p.scoreL), W/2 - 60, 30);
+  ctx.shadowColor = '#ff7ad8';
+  ctx.fillStyle = '#ff7ad8';
+  ctx.textAlign = 'left';
+  ctx.fillText(String(p.scoreR), W/2 + 60, 30);
+  ctx.restore();
+
+  // Header
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText(p.standalone ? 'PURE PONG  (easter egg)' : 'PONG INTERLUDE', W/2, 32);
+  ctx.font = 'bold 12px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.fillText(
+    p.standalone
+      ? 'FIRST TO ' + p.winScore + '   •   ESC to back out'
+      : 'FIRST TO ' + p.winScore + '   •   math match resumes after',
+    W/2, 60
+  );
+  ctx.restore();
+
+  // Player name labels at bottom
+  ctx.save();
+  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(120,200,255,0.7)';
+  ctx.fillText(game.paddleL.name, 60, H - 18);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(255,150,220,0.7)';
+  ctx.fillText(game.paddleR.name, W - 60, H - 18);
+  ctx.restore();
+
+  // Controls hint at bottom (only during intro)
+  if (p.intro > 0) {
+    ctx.save();
+    ctx.font = 'bold 16px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('LEFT:  W / S      RIGHT:  ↑ / ↓      (or touch your half of the screen to drag)', W/2, H - 60);
+    ctx.restore();
+  }
+
+  // Serve countdown number in the middle
+  if (p.serveCountdown > 0 && p.intro <= 0 && p.endCountdown === null) {
+    const n = Math.ceil(p.serveCountdown);
+    ctx.save();
+    ctx.font = 'bold 120px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.3 + 0.4 * (p.serveCountdown - Math.floor(p.serveCountdown))) + ')';
+    ctx.shadowColor = '#fff';
+    ctx.shadowBlur = 32;
+    ctx.fillText(String(n), W/2, H/2);
+    ctx.restore();
+  }
+
+  // Endgame banner
+  if (p.endCountdown !== null && p.winnerSide) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, W, H);
+    const accent = p.winnerSide === 'left' ? '#56e2ff' : '#ff7ad8';
+    ctx.font = 'bold 64px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = 32;
+    ctx.fillStyle = accent;
+    const winnerName = p.winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
+    ctx.fillText(winnerName + (p.standalone ? ' WINS!' : ' WINS THE INTERLUDE'), W/2, H/2 - 30);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 20px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(p.standalone ? 'Returning to menu...' : 'Math match resumes...', W/2, H/2 + 40);
+    ctx.restore();
+  }
+}
+
+function setupGameOverPhrases() {
+  const winnerName = (game.winnerSide === 'left' ? game.paddleL.name : game.paddleR.name) || '';
+  const loserName  = (game.winnerSide === 'left' ? game.paddleR.name : game.paddleL.name) || '';
+  const wU = winnerName.toUpperCase();
+  const lU = loserName.toUpperCase();
+
+  let winPhrase = null;
+  let losePhrase = null;
+
+  // Mimi's reaction to losing — 25% chance, otherwise the usual game-over view.
+  const mimiLose = NAME_PHRASES.MIMI && NAME_PHRASES.MIMI.lose;
+  if (lU === 'MIMI' && mimiLose && mimiLose.length && Math.random() < PHRASE_CHANCE) {
+    losePhrase = pick(mimiLose);
+  }
+
+  // Trey's victory line — only when he beats Mimi specifically. 25% chance.
+  const treyVsMimi = NAME_PHRASES.TREY && NAME_PHRASES.TREY.winVsMimi;
+  if (wU === 'TREY' && lU === 'MIMI' && treyVsMimi && treyVsMimi.length && Math.random() < PHRASE_CHANCE) {
+    winPhrase = pick(treyVsMimi);
+  }
+
+  game.gameOverPhrases = { winPhrase, losePhrase };
+}
+
+function triggerSpectacle(side) {
+  const kinds = ['lightning', 'volcano', 'tornado', 'meteor', 'aurora'];
+  const kind = pick(kinds);
+  game.effects.push({ kind, t: 0, side, seed: Math.random() * 1000 });
+  sfx.spectacle();
+  game.flash = { color: '#fff', a: 0.7 };
+  game.shake = { mag: 18, t: 0.7 };
+  game.toast = { text: 'STREAK x' + game.streak[side] + '!', t: 1.8, color: side === 'left' ? '#56e2ff' : '#ff7ad8' };
+}
+
+function updatePaddleMotion(p, dt) {
+  const t = performance.now() / 1000;
+  const phase = (p.side === 'left' ? 0 : Math.PI);
+  const idleBob = Math.sin(t * 1.4 + phase) * 14;
+  let target;
+  let trackSpeed = 4;
+
+  if (game.state === STATES.BALL) {
+    const isReceiver = (game.current && game.current.side !== p.side);
+    target = game.ball.y - p.h / 2;
+    trackSpeed = isReceiver ? 9 : 5;
+  } else if (game.state === STATES.PROBLEM) {
+    if (game.current && game.current.side === p.side) {
+      target = game.ball.y - p.h / 2 + Math.sin(t * 4 + phase) * 4;
+      trackSpeed = 6;
+    } else {
+      target = H/2 - p.h/2 + idleBob;
+      trackSpeed = 2.2;
+    }
+  } else if (game.state === STATES.RESULT) {
+    target = p.y;
+    trackSpeed = 3;
+  } else {
+    target = H/2 - p.h/2 + idleBob;
+    trackSpeed = 2;
+  }
+
+  if (p.vibe > 0) {
+    target += Math.sin(t * 35) * 6 * p.vibe;
+    p.vibe = Math.max(0, p.vibe - dt * 1.6);
+  }
+
+  target = clamp(target, 8, H - p.h - 8);
+  p.targetY = target;
+  p.y = lerp(p.y, target, 1 - Math.exp(-trackSpeed * dt));
+}
+
+function spawnHitParticles(x, y, color) {
+  for (let i = 0; i < 22; i++) {
+    const a = randF(0, TAU);
+    const s = randF(80, 360);
+    game.particles.push({
+      x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+      life: randF(0.4, 0.9), maxLife: 0.9, r: randF(2, 5), color, gravity: 280,
+    });
+  }
+}
+
+function spawnBallTrail() {
+  game.ball.trail.push({ x: game.ball.x, y: game.ball.y, life: 0.45, color: game.ball.color });
+  if (game.ball.trail.length > 40) game.ball.trail.shift();
+}
+
+let lastT = performance.now();
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  update(dt);
+  render();
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  // Background animation always runs (even when paused)
+  for (const s of game.stars) {
+    s.tw += dt * 2;
+    s.x -= dt * 16 * s.z;
+    if (s.x < -2) { s.x = W + 2; s.y = Math.random()*H; }
+  }
+  for (const p of game.particles) {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += (p.gravity || 0) * dt;
+    p.vx *= 0.985;
+    p.life -= dt;
+  }
+  game.particles = game.particles.filter(p => p.life > 0);
+
+  for (const t of game.ball.trail) t.life -= dt;
+  game.ball.trail = game.ball.trail.filter(t => t.life > 0);
+
+  if (game.shake.t > 0) game.shake.t -= dt;
+  if (game.flash.a > 0) game.flash.a = Math.max(0, game.flash.a - dt * 1.6);
+  if (game.toast.t > 0) game.toast.t -= dt;
+
+  game.paddleL.pulse = Math.max(0, game.paddleL.pulse - dt * 3);
+  game.paddleR.pulse = Math.max(0, game.paddleR.pulse - dt * 3);
+  updatePaddleMotion(game.paddleL, dt);
+  updatePaddleMotion(game.paddleR, dt);
+
+  for (const e of game.effects) e.t += dt;
+  game.effects = game.effects.filter(e => e.t < (e.kind === 'aurora' ? 3.2 : 1.8));
+
+  // Game logic only when NOT paused
+  if (game.paused) return;
+
+  if (game.state === STATES.PROBLEM) {
+    const cur = game.current;
+    cur.timeRemaining = cur.timeLimit - (performance.now() - cur.startTime) / 1000;
+
+    // CPU "thinking" — when the timer hits, simulate a submit
+    if (game.cpu.thinking && cur.side === 'right' && game.mode === 'versus1p' && !cur.submitted) {
+      game.cpu.elapsed += dt;
+      if (game.cpu.elapsed >= game.cpu.target) {
+        if (cur.problem.choices) {
+          // Multi-choice: pick the correct choice (or a wrong one on a miss)
+          const idx = game.cpu.willMiss
+            ? pickWrongChoiceIndex(cur.problem)
+            : cur.problem.correctIndex;
+          cur.typed = String(cur.problem.choices[idx]);
+        } else {
+          cur.typed = String(cur.problem.answer + (game.cpu.willMiss ? game.cpu.missAmount : 0));
+        }
+        game.cpu.thinking = false;
+        submitAnswer();
+        return;
+      }
+    }
+
+    if (cur.timeRemaining <= 0 && !cur.submitted) {
+      cur.timeUsed = cur.timeLimit;
+      cur.submitted = true;
+      onWrong(true, null);
+    }
+  } else if (game.state === STATES.BALL) {
+    const t = game.ball.travel;
+    t.elapsed += dt;
+    const k = clamp(t.elapsed / t.duration, 0, 1);
+    const ek = easeInOut(k);
+    game.ball.x = lerp(t.fromX, t.toX, ek);
+    const arc = Math.sin(k * Math.PI) * (H * 0.2);
+    game.ball.y = lerp(t.fromY, t.toY, ek) - arc;
+    spawnBallTrail();
+    if (k >= 1) {
+      sfx.hit();
+      const nextSide = game.current.side === 'left' ? 'right' : 'left';
+      // Pong interlude: fire once per match after PONG.TRIGGER correct answers,
+      // versus modes only (skipped in practice/custom).
+      const isVersus = game.mode === 'versus2p' || game.mode === 'versus1p';
+      if (isVersus && !game.pongFiredThisMatch && game.totalCorrect >= PONG.TRIGGER) {
+        game.pongFiredThisMatch = true;
+        startPongInterlude({ nextMathSide: nextSide });
+      } else {
+        startRound(nextSide);
+      }
+    }
+  } else if (game.state === STATES.PONG) {
+    updatePong(dt);
+  } else if (game.state === STATES.RESULT) {
+    if (game.ball.travel) {
+      const t = game.ball.travel;
+      t.elapsed += dt;
+      const k = clamp(t.elapsed / t.duration, 0, 1);
+      game.ball.x = lerp(t.fromX, t.toX, k);
+      game.ball.y = lerp(t.fromY, t.toY, k);
+      spawnBallTrail();
+    }
+    game.stateTimer -= dt;
+    if (game.stateTimer <= 0) {
+      if (game.winnerSide) {
+        game.state = STATES.GAME_OVER;
+        setupGameOverPhrases();
+        sfx.score();
+      } else if (game.mode === 'practice') {
+        startRound('left');
+      } else {
+        startRound(game.current.side); // loser serves
+      }
+    }
+  }
+}
+
+function render() {
+  ctx.save();
+  if (game.shake.t > 0) {
+    const m = game.shake.mag * game.shake.t;
+    ctx.translate(randF(-m, m), randF(-m, m));
+  }
+
+  drawBackground();
+  drawStars();
+
+  // Self-contained screens render their own backgrounds — skip the math overlays.
+  const standaloneScreens = [STATES.PONG, STATES.EASTER_MESSAGE, STATES.HELP, STATES.RECORDS];
+  if (!standaloneScreens.includes(game.state)) {
+    drawEffectsBack();
+    drawCenterLine();
+    drawPaddles();
+    drawBallTrail();
+    drawBall();
+  }
+
+  const noHUDStates = [STATES.TITLE, STATES.NAME_ENTRY, STATES.PRACTICE_MENU, STATES.CUSTOM_SETUP,
+                       STATES.PONG, STATES.EASTER_MESSAGE, STATES.HELP, STATES.RECORDS];
+  if (!noHUDStates.includes(game.state)) {
+    drawHUD();
+  }
+
+  if (game.state === STATES.TITLE) drawTitle();
+  else if (game.state === STATES.NAME_ENTRY) drawNameEntry();
+  else if (game.state === STATES.PRACTICE_MENU) drawPracticeMenu();
+  else if (game.state === STATES.CUSTOM_SETUP) drawCustomSetup();
+  else if (game.state === STATES.EASTER_MESSAGE) drawEasterMessage();
+  else if (game.state === STATES.HELP) drawHelp();
+  else if (game.state === STATES.RECORDS) drawRecords();
+  else if (game.state === STATES.PONG) drawPong();
+  else if (game.state === STATES.PROBLEM) drawProblem();
+  else if (game.state === STATES.GAME_OVER) drawGameOver();
+
+  drawEffectsFront();
+  drawToast();
+
+  if (game.paused) drawPauseOverlay();
+
+  ctx.restore();
+
+  if (game.flash.a > 0) {
+    ctx.fillStyle = game.flash.color;
+    ctx.globalAlpha = game.flash.a;
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, W, H);
+  g.addColorStop(0, '#0a0a25');
+  g.addColorStop(0.5, '#13002b');
+  g.addColorStop(1, '#22001a');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  const r = ctx.createRadialGradient(W*0.5, H*0.5, Math.min(W,H)*0.1, W*0.5, H*0.5, Math.max(W,H)*0.7);
+  r.addColorStop(0, 'rgba(120,40,200,0.18)');
+  r.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = r;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function drawStars() {
+  for (const s of game.stars) {
+    const a = 0.4 + 0.5 * Math.sin(s.tw);
+    ctx.globalAlpha = a * s.z;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCenterLine() {
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 14]);
+  ctx.beginPath();
+  ctx.moveTo(W/2, 0);
+  ctx.lineTo(W/2, H);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPaddle(p) {
+  const grad = ctx.createLinearGradient(p.x, p.y, p.x + p.w, p.y + p.h);
+  grad.addColorStop(0, p.color1);
+  grad.addColorStop(1, p.color2);
+
+  ctx.save();
+  ctx.shadowColor = p.color1;
+  ctx.shadowBlur = 20 + p.pulse * 50;
+  ctx.fillStyle = grad;
+  const expand = p.pulse * 4;
+  roundRect(p.x - expand/2, p.y - expand/2, p.w + expand, p.h + expand, 6);
+  ctx.fill();
+
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  roundRect(p.x + 2, p.y + 4, 3, p.h - 8, 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawPaddles() {
+  drawPaddle(game.paddleL);
+  drawPaddle(game.paddleR);
+}
+
+function drawBallTrail() {
+  for (const t of game.ball.trail) {
+    const a = clamp(t.life / 0.45, 0, 1);
+    ctx.globalAlpha = a * 0.6;
+    ctx.fillStyle = t.color;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, game.ball.r * (0.4 + 0.6*a), 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBall() {
+  if (game.state === STATES.TITLE || game.state === STATES.NAME_ENTRY ||
+      game.state === STATES.PRACTICE_MENU || game.state === STATES.CUSTOM_SETUP) return;
+  ctx.save();
+  ctx.shadowColor = game.ball.color;
+  ctx.shadowBlur = 30;
+  const grad = ctx.createRadialGradient(game.ball.x - 4, game.ball.y - 4, 1, game.ball.x, game.ball.y, game.ball.r);
+  grad.addColorStop(0, '#fff');
+  grad.addColorStop(0.6, game.ball.color);
+  grad.addColorStop(1, '#222');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(game.ball.x, game.ball.y, game.ball.r, 0, TAU);
+  ctx.fill();
+  ctx.restore();
+
+  for (const p of game.particles) {
+    const a = clamp(p.life / p.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r * a, 0, TAU);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  const tier = difficultyTier();
+
+  // Scores (versus) or solved count (practice/custom)
+  const isSolo = game.mode === 'practice' || game.mode === 'custom';
+  ctx.save();
+  if (!isSolo) {
+    ctx.font = 'bold 96px "Trebuchet MS"';
+    ctx.textBaseline = 'top';
+    ctx.shadowColor = '#56e2ff';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = 'rgba(120,200,255,0.85)';
+    ctx.textAlign = 'left';
+    ctx.fillText(String(game.score.left), 60, 24);
+
+    ctx.shadowColor = '#ff7ad8';
+    ctx.fillStyle = 'rgba(255,150,220,0.85)';
+    ctx.textAlign = 'right';
+    ctx.fillText(String(game.score.right), W - 60, 24);
+  } else {
+    ctx.font = 'bold 36px "Trebuchet MS"';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#7fff90';
+    ctx.shadowColor = '#7fff90';
+    ctx.shadowBlur = 12;
+    ctx.fillText('SOLVED ' + game.totalCorrect, 60, 30);
+  }
+  ctx.restore();
+
+  // Streaks
+  ctx.save();
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#ffe066';
+  if (isSolo) {
+    ctx.textAlign = 'left';
+    if (game.streak.left > 0) ctx.fillText('STREAK ' + game.streak.left, 60, 80);
+  } else {
+    ctx.textAlign = 'left';
+    if (game.streak.left > 0) ctx.fillText('STREAK ' + game.streak.left, 64, 130);
+    ctx.textAlign = 'right';
+    if (game.streak.right > 0) ctx.fillText('STREAK ' + game.streak.right, W - 64, 130);
+  }
+  ctx.restore();
+
+  // Top center
+  ctx.save();
+  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  if (game.mode === 'practice') {
+    ctx.fillText('PRACTICE — ' + PRACTICE_OP_LABELS[game.practiceOp], W/2, 28);
+    ctx.font = 'bold 14px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText('LEVEL ' + tier + '   ' + tierName(tier) + '   •   ESC to quit', W/2, 56);
+  } else if (game.mode === 'custom') {
+    const enabled = CUSTOM_OPS_ORDER.filter(o => game.customSetup.ops[o]);
+    const opSummary = enabled.map(o => ({add:'+',sub:'−',mul:'×',div:'÷',pow:'^',alg:'x'})[o]).join(' ');
+    ctx.fillText('CUSTOM   ' + opSummary, W/2, 28);
+    ctx.font = 'bold 14px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillText('DIFFICULTY ' + game.customSetup.difficulty + ' — ' +
+                 CUSTOM_DIFF_LABELS[game.customSetup.difficulty - 1].split('  ')[0] + '   •   ESC to quit', W/2, 56);
+  } else {
+    ctx.fillText('LEVEL ' + tier + '   ' + tierName(tier), W/2, 28);
+    ctx.font = 'bold 14px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    const modeTag = game.mode === 'versus1p' ? '1P vs CPU' : '2 PLAYER';
+    ctx.fillText('FIRST TO ' + WIN_SCORE + '  •  ' + curDiff().name.replace(/\s+/g, ' ') + '  •  ' + modeTag, W/2, 56);
+  }
+  ctx.restore();
+
+  // Player labels
+  if (!isSolo) {
+    ctx.save();
+    ctx.font = 'bold 18px "Trebuchet MS"';
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(120,200,255,0.7)';
+    ctx.fillText(game.paddleL.name, 60, H - 24);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,150,220,0.7)';
+    ctx.fillText(game.paddleR.name, W - 60, H - 24);
+    ctx.restore();
+  }
+
+  // Mute indicator (small, corner)
+  if (store.muted) {
+    ctx.save();
+    ctx.font = 'bold 12px "Trebuchet MS"';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(255,120,90,0.7)';
+    ctx.fillText('MUTED  (M)', W - 16, H - 8);
+    ctx.restore();
+  }
+}
+
+function drawPauseOverlay() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.font = 'bold 96px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe066';
+  ctx.shadowColor = '#ffe066';
+  ctx.shadowBlur = 32;
+  ctx.fillText('PAUSED', W/2, H/2);
+  ctx.shadowBlur = 0;
+  ctx.font = '20px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText('P  to resume', W/2, H/2 + 60);
+  ctx.fillText('Q  to quit to main menu', W/2, H/2 + 90);
+  ctx.restore();
+}
+
+function drawProblem() {
+  const cur = game.current;
+  const side = cur.side;
+  const halfX = side === 'left' ? W * 0.27 : W * 0.73;
+  const accent = side === 'left' ? '#56e2ff' : '#ff7ad8';
+
+  ctx.save();
+  const panelW = Math.min(W * 0.42, 560);
+  // Multi-choice needs more vertical room for the 2x2 grid.
+  const panelH = cur.problem.choices ? 340 : 280;
+  const panelX = halfX - panelW/2;
+  const panelY = H/2 - panelH/2;
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = 24;
+  ctx.fillStyle = 'rgba(10, 10, 30, 0.78)';
+  roundRect(panelX, panelY, panelW, panelH, 18);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = accent;
+  ctx.stroke();
+
+  const isCPU = game.mode === 'versus1p' && side === 'right';
+  const playerName = side === 'left' ? game.paddleL.name : game.paddleR.name;
+  const headerText = isCPU ? 'CPU — THINKING…' : (playerName + ' — SOLVE!');
+
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = accent;
+  ctx.fillText(headerText, halfX, panelY + 38);
+
+  // Algebra problems include "x =" in their text already; everything else gets "= ?".
+  ctx.font = cur.problem.isAlgebra ? 'bold 60px "Trebuchet MS"' : 'bold 76px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = 14;
+  const displayText = cur.problem.isAlgebra ? cur.problem.text : (cur.problem.text + ' = ?');
+  ctx.fillText(displayText, halfX, panelY + 120);
+  ctx.shadowBlur = 0;
+
+  if (cur.problem.choices) {
+    // Multi-choice: render 4 options in a 2x2 grid.
+    const cellW = (panelW - 80) / 2;
+    const cellH = 44;
+    const gapX = 14;
+    const gapY = 12;
+    const gridCenterY = panelY + 215;
+    for (let i = 0; i < cur.problem.choices.length; i++) {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const cx = halfX + (col === 0 ? -1 : 1) * (cellW/2 + gapX/2);
+      const cy = gridCenterY + (row === 0 ? -1 : 1) * (cellH/2 + gapY/2);
+
+      // Pill background
+      ctx.fillStyle = isCPU ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.10)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 1;
+      roundRect(cx - cellW/2, cy - cellH/2, cellW, cellH, 8);
+      ctx.fill();
+      ctx.stroke();
+
+      // Index label (top-left of pill)
+      ctx.font = 'bold 13px "Trebuchet MS"';
+      ctx.fillStyle = accent;
+      ctx.textAlign = 'left';
+      ctx.fillText('[' + (i + 1) + ']', cx - cellW/2 + 12, cy);
+
+      // Choice value (centered)
+      ctx.font = 'bold 26px "Trebuchet MS"';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(cur.problem.choices[i]), cx + 14, cy);
+    }
+    // CPU thinking indicator below the grid
+    if (isCPU) {
+      const dotCount = 1 + Math.floor((performance.now() / 320) % 3);
+      ctx.font = 'bold 18px "Trebuchet MS"';
+      ctx.fillStyle = '#ffe066';
+      ctx.textAlign = 'center';
+      ctx.fillText('CPU is choosing' + '.'.repeat(dotCount), halfX, gridCenterY + cellH + 30);
+    }
+  } else {
+    ctx.font = 'bold 56px "Trebuchet MS"';
+    ctx.fillStyle = '#ffe066';
+    if (isCPU) {
+      const dotCount = 1 + Math.floor((performance.now() / 320) % 3);
+      ctx.fillText('.'.repeat(dotCount), halfX, panelY + 200);
+    } else {
+      const cursor = (Math.floor(performance.now() / 380) % 2) ? '_' : ' ';
+      const typedDisplay = (cur.typed.length > 0 ? cur.typed : '') + cursor;
+      ctx.fillText(typedDisplay, halfX, panelY + 200);
+    }
+  }
+
+  // Timer bar
+  const barW = panelW - 60;
+  const barH = 14;
+  const barX = panelX + 30;
+  const barY = panelY + panelH - 30;
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  roundRect(barX, barY, barW, barH, 6);
+  ctx.fill();
+  const frac = clamp(cur.timeRemaining / cur.timeLimit, 0, 1);
+  const tcol = frac > 0.5 ? '#7fff90' : frac > 0.25 ? '#ffe066' : '#ff5577';
+  ctx.fillStyle = tcol;
+  ctx.shadowColor = tcol;
+  ctx.shadowBlur = 12;
+  roundRect(barX, barY, barW * frac, barH, 6);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.font = 'bold 16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText(cur.timeRemaining.toFixed(1) + 's  /  ' + cur.timeLimit.toFixed(1) + 's', halfX, barY - 8);
+  ctx.restore();
+}
+
+// Hitbox for the easter-egg icon, refreshed every frame in drawTitle. Used by
+// the canvas click/tap handler to decide if a click landed on the egg.
+let easterEggHitbox = null;
+
+function drawEasterEggIcon(cx, cy, size, t) {
+  ctx.save();
+  // Gentle pulse so the eye catches it
+  const pulse = 0.85 + 0.15 * Math.sin(t * 1.8);
+  ctx.globalAlpha = pulse;
+
+  // Egg body — oval, slightly more vertical than horizontal
+  ctx.fillStyle = '#fff5d6';
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, size * 0.42, size * 0.55, 0, 0, TAU);
+  ctx.fill();
+  ctx.stroke();
+
+  // Two decorative bands (zigzag-ish stripes)
+  ctx.strokeStyle = '#ff7ad8';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.36, cy - size * 0.08);
+  ctx.lineTo(cx - size * 0.12, cy - size * 0.18);
+  ctx.lineTo(cx + size * 0.12, cy - size * 0.08);
+  ctx.lineTo(cx + size * 0.36, cy - size * 0.18);
+  ctx.stroke();
+  ctx.strokeStyle = '#56e2ff';
+  ctx.beginPath();
+  ctx.moveTo(cx - size * 0.36, cy + size * 0.18);
+  ctx.lineTo(cx - size * 0.12, cy + size * 0.08);
+  ctx.lineTo(cx + size * 0.12, cy + size * 0.18);
+  ctx.lineTo(cx + size * 0.36, cy + size * 0.08);
+  ctx.stroke();
+
+  // Dots between bands
+  ctx.fillStyle = '#7fff90';
+  for (let i = -1; i <= 1; i++) {
+    ctx.beginPath();
+    ctx.arc(cx + i * size * 0.22, cy + size * 0.32, 1.6, 0, TAU);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawTitle() {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const t = performance.now() / 1000;
+
+  // === TOP: title + subtitle (anchored from top) ===
+  ctx.font = 'bold 92px "Trebuchet MS"';
+  const grad = ctx.createLinearGradient(0, 40, 0, 130);
+  grad.addColorStop(0, '#56e2ff');
+  grad.addColorStop(1, '#ff7ad8');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#a855f7';
+  ctx.shadowBlur = 32 + Math.sin(t * 2) * 8;
+  ctx.fillText('MATH PONG', W/2, 78);
+  ctx.shadowBlur = 0;
+
+  ctx.font = 'bold 20px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Family Math Battle', W/2, 130);
+
+  ctx.font = '13px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';
+  ctx.fillText('Solve fast — the quicker you answer, the LESS time the other player gets.', W/2, 156);
+  ctx.fillText('5 in a row triggers SPECIAL effects.', W/2, 174);
+
+  // === MODE (left column) + DIFFICULTY (right column) side-by-side ===
+  const modeLabels = {
+    versus2p: '2 PLAYERS',
+    versus1p: '1 PLAYER vs CPU',
+    practice: 'PRACTICE MODE',
+    custom:   'CUSTOM',
+  };
+  const modeBlurbs = {
+    versus2p: 'Same keyboard, taking turns. First to 7.',
+    versus1p: 'Solo vs the computer. Difficulty sets CPU speed & accuracy.',
+    practice: 'Drill one operation. No score, just streak.',
+    custom:   'Pick ops + how big the numbers get. Algebra too.'
+  };
+  const colMode = W * 0.27;
+  const colDiff = W * 0.73;
+  const headerY = 220;
+  const labelY  = 252;
+  const blurbY  = 280;
+  const blurb2Y = 300;
+
+  // MODE — left column
+  ctx.font = 'bold 13px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText('▲ ▼   MODE', colMode, headerY);
+
+  ctx.font = 'bold 26px "Trebuchet MS"';
+  ctx.fillStyle = '#7fff90';
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = 12;
+  ctx.fillText(modeLabels[game.mode], colMode, labelY);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '11px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText(modeBlurbs[game.mode], colMode, blurbY);
+
+  // DIFFICULTY — right column
+  const diff = curDiff();
+  ctx.font = 'bold 13px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText('◀ ▶   DIFFICULTY', colDiff, headerY);
+
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  const dColor = ['#7fff90', '#ffe066', '#ff7ad8'][diffIdx];
+  ctx.fillStyle = dColor;
+  ctx.shadowColor = dColor;
+  ctx.shadowBlur = 10;
+  ctx.fillText(diff.name, colDiff, labelY);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '11px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText(diff.blurb, colDiff, blurbY);
+  ctx.fillText('Min ' + diff.minTime.toFixed(1) + 's   •   Max ' + diff.maxTime.toFixed(1) + 's', colDiff, blurb2Y);
+
+  // === BOTTOM-ANCHORED STACK (built upward from H so it never collides) ===
+  let y = H - 18;
+  titleButtons = []; // refresh hitboxes every frame
+
+  // Mute warning at very bottom (only if muted)
+  if (store.muted) {
+    ctx.font = 'bold 12px "Trebuchet MS"';
+    ctx.fillStyle = '#ff7755';
+    ctx.textAlign = 'center';
+    ctx.fillText('SOUND MUTED   (press M to unmute)', W/2, y);
+    y -= 22;
+  }
+
+  // Two big side-by-side buttons: HELP HELP ME RHONDA  |  MY RECORDS
+  const btnW = 250;
+  const btnH = 54;
+  const btnGap = 24;
+  const btnTotalW = btnW * 2 + btnGap;
+  const btnX0 = W/2 - btnTotalW/2;
+  const btnY = y - btnH - 4;
+
+  drawButton(btnX0, btnY, btnW, btnH, 'HELP HELP ME RHONDA', '#56e2ff', 'controls & how to play');
+  titleButtons.push({ x: btnX0, y: btnY, w: btnW, h: btnH, action: 'help' });
+
+  const s = store.stats;
+  const recordsSub = (s.totalSolved||0) + ' solved · best streak ' + (s.bestStreak||0);
+  drawButton(btnX0 + btnW + btnGap, btnY, btnW, btnH, 'MY RECORDS', '#ffe066', recordsSub);
+  titleButtons.push({ x: btnX0 + btnW + btnGap, y: btnY, w: btnW, h: btnH, action: 'records' });
+
+  y = btnY - 18;
+
+  // INPUT mode indicator (multiple choice toggle) — plain language for kids.
+  ctx.font = 'bold 15px "Trebuchet MS"';
+  ctx.fillStyle = game.multiChoice ? '#7fff90' : '#fff';
+  ctx.textAlign = 'center';
+  const inputDesc = game.multiChoice
+    ? 'Multiple Choice   •   press C to Type instead'
+    : 'Type the answer   •   press C for Multiple Choice';
+  ctx.fillText(inputDesc, W/2, y);
+  y -= 36;
+
+  // SPACE to start / set up (large, blinking)
+  const startMsg = (game.mode === 'practice' || game.mode === 'custom') ? 'SPACE to set up' : 'SPACE to start';
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.45;
+  ctx.font = 'bold 24px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.shadowColor = '#fff';
+  ctx.shadowBlur = 16;
+  ctx.fillText(startMsg, W/2, y);
+  ctx.shadowBlur = 0;
+  y -= 42;
+
+  // press [N] to rename
+  ctx.font = '12px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fillText('press [N] to rename', W/2, y);
+  y -= 28;
+
+  // NAMES (large, colored per side)
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  const lname = store.names.left;
+  const rname = game.mode === 'versus1p' ? 'CPU' : store.names.right;
+  ctx.fillStyle = '#56e2ff';
+  ctx.fillText(lname, W/2 - 110, y);
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('vs', W/2, y);
+  ctx.fillStyle = '#ff7ad8';
+  ctx.fillText(rname, W/2 + 110, y);
+
+  // Head-to-head record above names (if any matches recorded for this pair)
+  const h2h = getH2H(lname, rname);
+  if (h2h) {
+    y -= 28;
+    ctx.font = 'bold 16px "Trebuchet MS"';
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText('H2H:   ' + h2h.nameA + '  ' + h2h.aWins + '  —  ' + h2h.bWins + '  ' + h2h.nameB, W/2, y);
+  }
+
+  // === EASTER EGG (bottom-right area) ===
+  // Pastel egg with stripes + dots, gently pulsing. Clickable / tappable.
+  // Tucked toward the corner but pulled slightly inward so it's findable.
+  const eggSize = 30;
+  const eggCX = W - 48;
+  const eggCY = H - 56;
+  drawEasterEggIcon(eggCX, eggCY, eggSize, t);
+  // Hitbox a bit larger than the egg for forgiving taps on touch screens
+  easterEggHitbox = {
+    x: eggCX - eggSize * 0.55,
+    y: eggCY - eggSize * 0.65,
+    w: eggSize * 1.1,
+    h: eggSize * 1.3,
+  };
+
+  ctx.restore();
+}
+
+function getAllH2HRecords() {
+  // Collect all unique pairs from store.records, aggregating both directions.
+  const pairs = {};
+  for (const w in store.records) {
+    for (const l in store.records[w]) {
+      const wins = store.records[w][l] || 0;
+      if (wins === 0) continue;
+      const sorted = [w, l].sort();
+      const key = sorted.join('||');
+      pairs[key] = pairs[key] || { a: sorted[0], b: sorted[1], aWins: 0, bWins: 0 };
+      if (w === sorted[0]) pairs[key].aWins += wins;
+      else pairs[key].bWins += wins;
+    }
+  }
+  return Object.values(pairs);
+}
+
+function drawHelp() {
+  ctx.save();
+  // Backdrop
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0a1530');
+  grad.addColorStop(1, '#020610');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Title
+  ctx.font = 'bold 56px "Trebuchet MS"';
+  ctx.fillStyle = '#56e2ff';
+  ctx.shadowColor = '#56e2ff';
+  ctx.shadowBlur = 24;
+  ctx.fillText('HELP HELP ME RHONDA', W/2, 70);
+  ctx.shadowBlur = 0;
+
+  ctx.font = 'italic 14px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('Controls & how to play', W/2, 105);
+
+  // Two-column layout
+  const colY = 150;
+  const lineH = 20;
+  const sectionGap = 14;
+  const col1X = W * 0.28;
+  const col2X = W * 0.72;
+  ctx.textAlign = 'left';
+
+  function drawSection(x, startY, title, lines) {
+    ctx.font = 'bold 18px "Trebuchet MS"';
+    ctx.fillStyle = '#7fff90';
+    ctx.fillText(title, x - 180, startY);
+    ctx.font = '14px "Trebuchet MS"';
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], x - 180, startY + 24 + i * lineH);
+    }
+    return startY + 24 + lines.length * lineH + sectionGap;
+  }
+
+  let y1 = colY;
+  y1 = drawSection(col1X, y1, 'HOW TO ANSWER', [
+    'NUMBERS 0-9 — type your answer',
+    '(auto-submits when correct)',
+    'ENTER — force-submit',
+    'BACKSPACE — erase a digit',
+    '−  key — for negative answers',
+    'In Multiple Choice mode:',
+    '   1, 2, 3, 4 — pick a choice',
+  ]);
+  y1 = drawSection(col1X, y1, 'TITLE SCREEN', [
+    '▲ ▼ — change game mode',
+    '◀ ▶ — change difficulty',
+    'N — rename players',
+    'C — toggle Multiple Choice',
+    'SPACE — start the game',
+  ]);
+
+  let y2 = colY;
+  y2 = drawSection(col2X, y2, 'DURING A GAME', [
+    'P — pause / resume',
+    'Q — (paused) quit to main menu',
+    'M — mute / unmute (anywhere)',
+    'ESC — practice / custom modes:',
+    '   quit back to title',
+  ]);
+  y2 = drawSection(col2X, y2, 'PONG INTERLUDE', [
+    'After 10 correct answers in a',
+    'versus match — first to 3.',
+    '',
+    'W / S — left paddle up/down',
+    '↑ / ↓ — right paddle up/down',
+    'Touch your half on tablet/phone',
+  ]);
+  y2 = drawSection(col2X, y2, 'GAME MODES', [
+    '2 PLAYERS — same keyboard',
+    '1 vs CPU — solo vs computer',
+    'PRACTICE — drill one op',
+    'CUSTOM — pick ops + difficulty',
+  ]);
+
+  // Footer
+  const t = performance.now() / 1000;
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.fillText('Click anywhere or press ESC / SPACE to go back', W/2, H - 36);
+
+  ctx.restore();
+}
+
+function drawRecords() {
+  ctx.save();
+  // Backdrop
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#1a0e05');
+  grad.addColorStop(1, '#050200');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Title
+  ctx.font = 'bold 64px "Trebuchet MS"';
+  ctx.fillStyle = '#ffe066';
+  ctx.shadowColor = '#ffe066';
+  ctx.shadowBlur = 28;
+  ctx.fillText('MY RECORDS', W/2, 80);
+  ctx.shadowBlur = 0;
+
+  // LIFETIME block
+  const s = store.stats;
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.fillStyle = '#7fff90';
+  ctx.fillText('LIFETIME', W/2, 150);
+
+  ctx.font = 'bold 30px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText((s.totalSolved||0) + ' problems solved', W/2, 195);
+
+  ctx.font = '20px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Best streak ever:  ' + (s.bestStreak||0), W/2, 232);
+  ctx.fillText('Matches played:  ' + (s.gamesPlayed||0), W/2, 260);
+
+  // HEAD-TO-HEAD block
+  const pairs = getAllH2HRecords();
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.fillStyle = '#ff7ad8';
+  ctx.fillText('HEAD TO HEAD', W/2, 320);
+
+  if (pairs.length === 0) {
+    ctx.font = 'italic 16px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillText('No matches yet.  Rename PLAYER 1 / PLAYER 2 (press N on title)', W/2, 355);
+    ctx.fillText('and play a versus match — your record shows up here.', W/2, 378);
+  } else {
+    // Sort by total games descending
+    pairs.sort((p1, p2) => (p2.aWins + p2.bWins) - (p1.aWins + p1.bWins));
+    const startY = 360;
+    const lineH = 30;
+    ctx.font = 'bold 20px "Trebuchet MS"';
+    for (let i = 0; i < Math.min(pairs.length, 8); i++) {
+      const p = pairs[i];
+      // Highlight the leader's name
+      const aLead = p.aWins > p.bWins;
+      const bLead = p.bWins > p.aWins;
+      const tx = W/2;
+      ctx.textAlign = 'right';
+      ctx.fillStyle = aLead ? '#7fff90' : '#fff';
+      ctx.fillText(p.a, tx - 60, startY + i * lineH);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffe066';
+      ctx.fillText(p.aWins + '  —  ' + p.bWins, tx, startY + i * lineH);
+      ctx.textAlign = 'left';
+      ctx.fillStyle = bLead ? '#7fff90' : '#fff';
+      ctx.fillText(p.b, tx + 60, startY + i * lineH);
+    }
+    if (pairs.length > 8) {
+      ctx.font = 'italic 14px "Trebuchet MS"';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.fillText('+ ' + (pairs.length - 8) + ' more pairs', W/2, startY + 8 * lineH + 12);
+    }
+  }
+
+  // Footer
+  const t = performance.now() / 1000;
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.fillText('Click anywhere or press ESC / SPACE to go back', W/2, H - 36);
+
+  ctx.restore();
+}
+
+function drawEasterMessage() {
+  ctx.save();
+  // Soft warm gradient backdrop
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#1a0420');
+  grad.addColorStop(0.6, '#0d1530');
+  grad.addColorStop(1, '#070210');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  const t = performance.now() / 1000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Header
+  ctx.font = 'bold 56px "Trebuchet MS"';
+  ctx.fillStyle = '#ff7ad8';
+  ctx.shadowColor = '#ff7ad8';
+  ctx.shadowBlur = 26 + Math.sin(t * 2) * 8;
+  ctx.fillText('FOR TREY', W/2, 92);
+  ctx.shadowBlur = 0;
+
+  ctx.font = 'italic 16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText('— from Dad', W/2, 132);
+
+  // Word-wrap the message
+  ctx.font = '21px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  const maxWidth = Math.min(W - 80, 900);
+  const lineHeight = 32;
+  const words = EASTER_MESSAGE.split(' ');
+  const lines = [];
+  let currentLine = '';
+  for (const word of words) {
+    const test = currentLine ? currentLine + ' ' + word : word;
+    if (ctx.measureText(test).width <= maxWidth) {
+      currentLine = test;
+    } else {
+      if (currentLine) lines.push(currentLine);
+      currentLine = word;
+    }
+  }
+  if (currentLine) lines.push(currentLine);
+
+  // Center the block vertically in the available middle area
+  const blockTop = 180;
+  const blockBottom = H - 130;
+  const blockHeight = lines.length * lineHeight;
+  const startY = blockTop + ((blockBottom - blockTop) - blockHeight) / 2 + lineHeight / 2;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], W/2, startY + i * lineHeight);
+  }
+
+  // Footer prompts
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(127,255,144,' + blink + ')';
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = 14;
+  ctx.fillText('SPACE  to play Pong', W/2, H - 70);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '14px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fillText('ESC  to go back', W/2, H - 38);
+
+  ctx.restore();
+}
+
+function drawNameEntry() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, W, H);
+
+  const ne = game.nameEntry;
+  const accent = ne.side === 'left' ? '#56e2ff' : '#ff7ad8';
+  const t = performance.now() / 1000;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.font = 'bold 36px "Trebuchet MS"';
+  ctx.fillStyle = accent;
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = 24;
+  ctx.fillText(ne.side === 'left' ? 'PLAYER 1 NAME' : 'PLAYER 2 NAME', W/2, H/2 - 100);
+  ctx.shadowBlur = 0;
+
+  // Box
+  const boxW = 560, boxH = 100;
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = 24;
+  ctx.fillStyle = 'rgba(10,10,30,0.78)';
+  roundRect(W/2 - boxW/2, H/2 - boxH/2, boxW, boxH, 14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Text
+  const cursor = (Math.floor(t * 2.2) % 2) ? '_' : ' ';
+  ctx.font = 'bold 56px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(ne.text + cursor, W/2, H/2 + 6);
+
+  ctx.font = '16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillText('TYPE letters / numbers   •   ENTER to confirm   •   ESC to cancel', W/2, H/2 + 100);
+  ctx.fillText('(max 12 characters)', W/2, H/2 + 124);
+
+  // When name entry was forced before a 2P match, the field is pre-filled with
+  // a suggested name (TREY / MIMI). Show a hint so the user knows they can
+  // accept or change it.
+  if (ne.thenAction === 'startGame' && ne.suggested) {
+    ctx.font = 'bold 15px "Trebuchet MS"';
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText(
+      ne.side === 'left'
+        ? 'Suggested:  TREY     (Enter to accept, or Backspace to change)'
+        : 'Suggested:  MIMI     (Enter to accept, or Backspace to change)',
+      W/2, H/2 - 150);
+  }
+  ctx.restore();
+}
+
+function drawCustomSetup() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, W, H);
+
+  const t = performance.now() / 1000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // === TOP: header ===
+  ctx.font = 'bold 56px "Trebuchet MS"';
+  ctx.fillStyle = '#7fff90';
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = 24;
+  ctx.fillText('CUSTOM', W/2, 80);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '14px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText('Pick the math you want to practice. Press number keys to toggle.', W/2, 122);
+
+  // === MIDDLE: op list (centered, left-aligned within the group) ===
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.textAlign = 'left';
+  const opStartX = W/2 - 200;
+  const opStartY = 165;
+  const lineH = 34;
+  for (let i = 0; i < CUSTOM_OPS_ORDER.length; i++) {
+    const op = CUSTOM_OPS_ORDER[i];
+    const on = !!game.customSetup.ops[op];
+    const y = opStartY + i * lineH;
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillText('[' + (i + 1) + ']', opStartX - 55, y);
+    ctx.fillStyle = on ? '#7fff90' : 'rgba(255,255,255,0.25)';
+    ctx.fillText(on ? '[✓]' : '[ ]', opStartX, y);
+    ctx.fillStyle = on ? '#fff' : 'rgba(255,255,255,0.4)';
+    ctx.fillText(CUSTOM_OP_LABELS[op], opStartX + 60, y);
+  }
+
+  // === BOTTOM-ANCHORED: difficulty, hints, help ===
+  // (Anchored from H so the layout breathes the same on any window height.)
+  ctx.textAlign = 'center';
+
+  // Help text at very bottom
+  ctx.font = '12px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fillText('Custom mode: solo, no scoring, no auto-leveling.', W/2, H - 30);
+
+  // Keyboard hints above help
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.font = 'bold 16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.fillText('SPACE  start   •   ESC  back   •   1-6  toggle   •   ◀▶  difficulty', W/2, H - 65);
+
+  // Difficulty section, with breathing room above the hints
+  const diffValueY = H - 130;
+  const diffLabelY = diffValueY - 36;
+
+  ctx.font = 'bold 13px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText('◀ ▶   DIFFICULTY (number magnitudes)', W/2, diffLabelY);
+
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  const dColor = ['#7fff90', '#a5e264', '#ffe066', '#ff9d50', '#ff5577'][game.customSetup.difficulty - 1];
+  ctx.fillStyle = dColor;
+  ctx.shadowColor = dColor;
+  ctx.shadowBlur = 14;
+  const dLabel = (game.customSetup.difficulty) + '.   ' + CUSTOM_DIFF_LABELS[game.customSetup.difficulty - 1];
+  ctx.fillText(dLabel, W/2, diffValueY);
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
+function drawPracticeMenu() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+
+  const t = performance.now() / 1000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.font = 'bold 80px "Trebuchet MS"';
+  ctx.fillStyle = '#ffe066';
+  ctx.shadowColor = '#ffe066';
+  ctx.shadowBlur = 32;
+  ctx.fillText('PRACTICE', W/2, H/2 - 150);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '18px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.fillText('No scoring, no opponent. Just rapid problems with a streak counter.', W/2, H/2 - 90);
+  ctx.fillText('Time pressure still applies — but the digit floor keeps it fair.', W/2, H/2 - 64);
+
+  // Op cycler
+  ctx.font = 'bold 32px "Trebuchet MS"';
+  const arrowBlink = (Math.floor(t * 2.5) % 2) ? 1 : 0.55;
+  ctx.fillStyle = 'rgba(255,255,255,' + arrowBlink + ')';
+  ctx.fillText('◀', W/2 - 240, H/2 + 20);
+  ctx.fillText('▶', W/2 + 240, H/2 + 20);
+
+  ctx.font = 'bold 36px "Trebuchet MS"';
+  ctx.fillStyle = '#7fff90';
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = 18;
+  ctx.fillText(PRACTICE_OP_LABELS[game.practiceOp], W/2, H/2 + 20);
+  ctx.shadowBlur = 0;
+
+  ctx.font = 'bold 20px "Trebuchet MS"';
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.fillText('SPACE  to start   •   ESC  to back', W/2, H/2 + 110);
+  ctx.restore();
+}
+
+function drawGameOver() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, W, H);
+
+  const winner = game.winnerSide === 'left' ? game.paddleL : game.paddleR;
+  const accent = game.winnerSide === 'left' ? '#56e2ff' : '#ff7ad8';
+  const loserAccent = game.winnerSide === 'left' ? '#ff7ad8' : '#56e2ff';
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 120px "Trebuchet MS"';
+  ctx.shadowColor = accent;
+  ctx.shadowBlur = 40;
+  ctx.fillStyle = accent;
+  ctx.fillText(winner.name + ' WINS!', W/2, H/2 - 130);
+
+  ctx.shadowBlur = 0;
+  ctx.font = 'bold 40px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(game.score.left + '  —  ' + game.score.right, W/2, H/2 - 40);
+
+  ctx.font = '20px "Trebuchet MS"';
+  ctx.fillStyle = '#ffe066';
+  ctx.fillText(game.totalCorrect + ' problems solved this match   •   best streak ' + game.matchBestStreak, W/2, H/2 + 10);
+
+  // Lifetime
+  const s = store.stats;
+  ctx.font = '15px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText('LIFETIME:  ' + (s.totalSolved||0) + ' solved   •   best streak ' + (s.bestStreak||0) + '   •   ' + (s.gamesPlayed||0) + ' matches', W/2, H/2 + 45);
+
+  // Head-to-head record for this pair (now updated with the just-finished match)
+  const h2h = getH2H(game.paddleL.name, game.paddleR.name);
+  if (h2h) {
+    ctx.font = 'bold 17px "Trebuchet MS"';
+    ctx.fillStyle = '#ffe066';
+    ctx.fillText('H2H:   ' + h2h.nameA + '  ' + h2h.aWins + '  —  ' + h2h.bWins + '  ' + h2h.nameB, W/2, H/2 + 73);
+  }
+
+  // Personalized phrases for named players (e.g. MIMI, TREY)
+  let pressSpaceY = H/2 + 160;
+  if (game.gameOverPhrases) {
+    let phraseY = H/2 + 105;
+    if (game.gameOverPhrases.winPhrase) {
+      ctx.font = 'italic bold 22px "Trebuchet MS"';
+      ctx.fillStyle = accent;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = 12;
+      ctx.fillText('“' + game.gameOverPhrases.winPhrase + '”', W/2, phraseY);
+      ctx.shadowBlur = 0;
+      phraseY += 32;
+    }
+    if (game.gameOverPhrases.losePhrase) {
+      ctx.font = 'italic 18px "Trebuchet MS"';
+      ctx.fillStyle = 'rgba(255,180,180,0.75)';
+      ctx.fillText('“' + game.gameOverPhrases.losePhrase + '”', W/2, phraseY);
+      phraseY += 28;
+    }
+    if (game.gameOverPhrases.winPhrase || game.gameOverPhrases.losePhrase) {
+      pressSpaceY = phraseY + 30;
+    }
+  }
+
+  const t = performance.now() / 1000;
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
+  ctx.font = 'bold 28px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.fillText('PRESS  SPACE  TO  CONTINUE', W/2, pressSpaceY);
+  ctx.restore();
+}
+
+function drawToast() {
+  if (game.toast.t <= 0) return;
+  const t = game.toast.t;
+  const a = clamp(t / 0.4, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.font = 'bold 56px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = game.toast.color;
+  ctx.shadowColor = game.toast.color;
+  ctx.shadowBlur = 24;
+  const yOff = (1 - a) * 30;
+  ctx.fillText(game.toast.text, W/2, H * 0.32 + yOff);
+  ctx.restore();
+}
+
+// ======= SPECTACLE EFFECTS =======
+function drawEffectsBack() {
+  for (const e of game.effects) {
+    if (e.kind === 'aurora') drawAurora(e);
+  }
+}
+function drawEffectsFront() {
+  for (const e of game.effects) {
+    if (e.kind === 'lightning') drawLightning(e);
+    else if (e.kind === 'volcano') drawVolcano(e);
+    else if (e.kind === 'tornado') drawTornado(e);
+    else if (e.kind === 'meteor') drawMeteor(e);
+  }
+}
+
+function drawLightning(e) {
+  const dur = 1.6;
+  const k = clamp(e.t / dur, 0, 1);
+  if (k > 1) return;
+  const flicker = Math.random() < (k < 0.5 ? 0.7 : 0.3);
+  if (!flicker && k > 0.1) return;
+  ctx.save();
+  ctx.globalAlpha = (1 - k) * 0.95;
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillRect(0, 0, W, H);
+
+  const bolts = 3 + Math.floor(Math.random() * 4);
+  for (let b = 0; b < bolts; b++) {
+    const startX = randF(W * 0.1, W * 0.9);
+    let x = startX, y = 0;
+    ctx.strokeStyle = 'rgba(220,240,255,0.95)';
+    ctx.lineWidth = 3;
+    ctx.shadowColor = '#aef';
+    ctx.shadowBlur = 24;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    while (y < H) {
+      x += randF(-40, 40);
+      y += randF(20, 60);
+      ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawVolcano(e) {
+  const dur = 1.6;
+  const k = clamp(e.t / dur, 0, 1);
+  if (k > 1) return;
+  const sources = [W * 0.25, W * 0.5, W * 0.75];
+  if (e.t < 0.05 || Math.random() < 0.6) {
+    for (const sx of sources) {
+      for (let i = 0; i < 6; i++) {
+        const a = randF(-Math.PI*0.35, -Math.PI*0.65) - Math.PI/2 + Math.PI;
+        const speed = randF(400, 900);
+        game.particles.push({
+          x: sx + randF(-30, 30), y: H - 4,
+          vx: Math.cos(a) * speed,
+          vy: Math.sin(a) * speed * 0.7 - randF(400, 900),
+          life: randF(0.8, 1.6), maxLife: 1.6, r: randF(3, 8),
+          color: pick(['#ff5722', '#ffcc00', '#ff8800', '#ffeb3b']),
+          gravity: 700,
+        });
+      }
+    }
+  }
+  ctx.save();
+  const glow = ctx.createRadialGradient(W/2, H, 10, W/2, H, H * 0.6);
+  glow.addColorStop(0, 'rgba(255,140,40,' + (0.5 * (1 - k)) + ')');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+function drawTornado(e) {
+  const dur = 1.7;
+  const k = clamp(e.t / dur, 0, 1);
+  if (k > 1) return;
+  const cx = W * (e.side === 'left' ? 0.3 : 0.7);
+  const baseY = H * 0.85;
+  ctx.save();
+  ctx.globalAlpha = 0.85 * (1 - k * 0.4);
+  for (let i = 0; i < 60; i++) {
+    const yy = baseY - i * 12;
+    const wob = Math.sin(e.t * 8 + i * 0.3) * (i * 1.6);
+    const w = 18 + i * 1.4;
+    const x = cx + wob;
+    ctx.fillStyle = 'rgba(180,200,220,' + (0.05 + (i % 4) * 0.04) + ')';
+    ctx.beginPath();
+    ctx.ellipse(x, yy, w, 6, 0, 0, TAU);
+    ctx.fill();
+  }
+  for (let i = 0; i < 40; i++) {
+    const ang = e.t * 5 + i;
+    const r = 30 + ((i * 17) % 80);
+    const px = cx + Math.cos(ang) * r;
+    const py = baseY - (i * 11) % 480 + Math.sin(ang) * 6;
+    ctx.fillStyle = 'rgba(220,220,220,0.7)';
+    ctx.fillRect(px, py, 2, 2);
+  }
+  ctx.restore();
+}
+
+function drawMeteor(e) {
+  const dur = 1.6;
+  const k = clamp(e.t / dur, 0, 1);
+  if (k > 1) return;
+  if (Math.random() < 0.7) {
+    for (let i = 0; i < 2; i++) {
+      const sx = randF(0, W);
+      game.particles.push({
+        x: sx, y: -20,
+        vx: randF(-200, -400), vy: randF(700, 1100),
+        life: 1.0, maxLife: 1.0, r: 5,
+        color: pick(['#fff', '#ffe066', '#ffaa44']),
+        gravity: 0,
+      });
+    }
+  }
+}
+
+function drawAurora(e) {
+  const dur = 3.2;
+  const k = clamp(e.t / dur, 0, 1);
+  if (k > 1) return;
+  ctx.save();
+  ctx.globalAlpha = Math.sin(k * Math.PI) * 0.6;
+  for (let band = 0; band < 4; band++) {
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, 'rgba(80,255,180,0)');
+    grad.addColorStop(0.5, ['rgba(80,255,180,0.5)', 'rgba(120,160,255,0.5)', 'rgba(255,150,220,0.4)', 'rgba(180,255,80,0.4)'][band]);
+    grad.addColorStop(1, 'rgba(80,255,180,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    const yBase = H * (0.15 + band * 0.18);
+    ctx.moveTo(0, yBase);
+    for (let x = 0; x <= W; x += 20) {
+      const yy = yBase + Math.sin((x * 0.005) + e.t * 2 + band) * 60;
+      ctx.lineTo(x, yy);
+    }
+    ctx.lineTo(W, yBase + 60);
+    ctx.lineTo(0, yBase + 60);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// boot
+resize();
+window.addEventListener('resize', resize);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
