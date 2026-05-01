@@ -847,6 +847,10 @@ let mcChoiceHitboxes = [];
 let titleExtras = {};
 // On-screen number keypad (typing mode on touch). Refreshed in drawProblem.
 let keypadHitboxes = [];
+// In-game pause button hitbox (top center). Set in drawHUD, cleared otherwise.
+let hudPauseHitbox = null;
+// Pause overlay tap buttons (Resume / Quit). Set in drawPauseOverlay.
+let pauseOverlayButtons = [];
 
 function hitTest(x, y, box) {
   return box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
@@ -938,6 +942,14 @@ canvas.addEventListener('click', (e) => {
     }
   }
 
+  // HUD pause button — tap during PROBLEM / BALL / RESULT states
+  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT;
+  if (inPlay && hudPauseHitbox && hitTest(x, y, hudPauseHitbox)) {
+    togglePause();
+    sfx.type();
+    return;
+  }
+
   // Easter message — tap anywhere starts standalone Pong
   if (game.state === STATES.EASTER_MESSAGE) {
     startPongStandalone();
@@ -963,8 +975,32 @@ canvas.addEventListener('click', (e) => {
     return;
   }
 
+  // Pause overlay — tap Resume or Quit to Menu
+  if (game.paused && pauseOverlayButtons && pauseOverlayButtons.length) {
+    for (const btn of pauseOverlayButtons) {
+      if (hitTest(x, y, btn)) {
+        if (btn.action === 'resume') {
+          togglePause();
+        } else if (btn.action === 'quit') {
+          game.paused = false;
+          game.state = STATES.TITLE;
+        }
+        sfx.type();
+        return;
+      }
+    }
+    return; // tap outside the buttons does nothing while paused
+  }
+
   // Problem state — multi-choice OR on-screen keypad (typing mode)
   if (game.state === STATES.PROBLEM && game.current) {
+    // Tap on the HUD pause button to pause (also works in BALL/RESULT states
+    // via the check below, but PROBLEM is the most common one)
+    if (hudPauseHitbox && hitTest(x, y, hudPauseHitbox)) {
+      togglePause();
+      sfx.type();
+      return;
+    }
     if (game.paused) return;
     if (game.mode === 'versus1p' && game.current.side === 'right') return; // CPU's turn
     const cur = game.current;
@@ -1406,7 +1442,9 @@ function handleCustomSetupKey(e) {
 }
 
 function togglePause() {
-  if (game.state !== STATES.PROBLEM) return;
+  // Pause is allowed during any active gameplay state (PROBLEM, BALL, RESULT).
+  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT;
+  if (!inPlay) return;
   if (game.paused) {
     const dur = performance.now() - game.pauseStart;
     if (game.current) game.current.startTime += dur;
@@ -2580,31 +2618,37 @@ function drawBall() {
 
 function drawHUD() {
   const tier = difficultyTier();
+  const narrow = W < 720;
+  // Scale the giant score font down on narrow screens so it doesn't overlap
+  // the level label in the top-center.
+  const scoreFontSize = narrow ? 56 : 96;
+  const scoreOffsetX = narrow ? 28 : 60;
+  const scoreY = narrow ? 14 : 24;
 
   // Scores (versus) or solved count (practice/custom)
   const isSolo = game.mode === 'practice' || game.mode === 'custom';
   ctx.save();
   if (!isSolo) {
-    ctx.font = 'bold 96px "Trebuchet MS"';
+    ctx.font = 'bold ' + scoreFontSize + 'px "Trebuchet MS"';
     ctx.textBaseline = 'top';
     ctx.shadowColor = '#56e2ff';
     ctx.shadowBlur = 18;
     ctx.fillStyle = 'rgba(120,200,255,0.85)';
     ctx.textAlign = 'left';
-    ctx.fillText(String(game.score.left), 60, 24);
+    ctx.fillText(String(game.score.left), scoreOffsetX, scoreY);
 
     ctx.shadowColor = '#ff7ad8';
     ctx.fillStyle = 'rgba(255,150,220,0.85)';
     ctx.textAlign = 'right';
-    ctx.fillText(String(game.score.right), W - 60, 24);
+    ctx.fillText(String(game.score.right), W - scoreOffsetX, scoreY);
   } else {
-    ctx.font = 'bold 36px "Trebuchet MS"';
+    ctx.font = 'bold ' + (narrow ? 28 : 36) + 'px "Trebuchet MS"';
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
     ctx.fillStyle = '#7fff90';
     ctx.shadowColor = '#7fff90';
     ctx.shadowBlur = 12;
-    ctx.fillText('SOLVED ' + game.totalCorrect, 60, 30);
+    ctx.fillText('SOLVED ' + game.totalCorrect, scoreOffsetX, scoreY + 4);
   }
   ctx.restore();
 
@@ -2675,24 +2719,69 @@ function drawHUD() {
     ctx.fillText('MUTED  (M)', W - 16, H - 8);
     ctx.restore();
   }
+
+  // === PAUSE BUTTON (top-center, just below the level/diff line) ===
+  // Tappable on touch, also serves as a visible cue on desktop. Hidden on
+  // game-over since there's nothing to pause then.
+  if (game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT) {
+    const pbW = 90, pbH = 28;
+    const pbX = W/2 - pbW/2;
+    const pbY = narrow ? 80 : 86;
+    const hovered = hitTest(mouseX, mouseY, { x: pbX, y: pbY, w: pbW, h: pbH });
+    ctx.save();
+    ctx.fillStyle = hovered ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = hovered ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.30)';
+    ctx.lineWidth = 1.4;
+    roundRect(pbX, pbY, pbW, pbH, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font = 'bold 13px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = hovered ? '#fff' : 'rgba(255,255,255,0.85)';
+    ctx.fillText('‖  PAUSE', pbX + pbW/2, pbY + pbH/2);
+    ctx.restore();
+    hudPauseHitbox = { x: pbX, y: pbY, w: pbW, h: pbH };
+  } else {
+    hudPauseHitbox = null;
+  }
 }
 
 function drawPauseOverlay() {
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
   ctx.fillRect(0, 0, W, H);
-  ctx.font = 'bold 96px "Trebuchet MS"';
+  ctx.font = 'bold 84px "Trebuchet MS"';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = '#ffe066';
   ctx.shadowColor = '#ffe066';
   ctx.shadowBlur = 32;
-  ctx.fillText('PAUSED', W/2, H/2);
+  ctx.fillText('PAUSED', W/2, H/2 - 60);
   ctx.shadowBlur = 0;
-  ctx.font = '20px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('P  to resume', W/2, H/2 + 60);
-  ctx.fillText('Q  to quit to main menu', W/2, H/2 + 90);
+
+  // Two big tap-friendly buttons: Resume and Quit to Menu
+  pauseOverlayButtons = [];
+  const btnW = Math.min(280, W - 60);
+  const btnH = 54;
+  const btnGap = 16;
+
+  // Resume (green)
+  const resumeY = H/2 + 10;
+  const resumeX = W/2 - btnW/2;
+  drawButton(resumeX, resumeY, btnW, btnH, 'RESUME', '#7fff90');
+  pauseOverlayButtons.push({ x: resumeX, y: resumeY, w: btnW, h: btnH, action: 'resume' });
+
+  // Quit (red)
+  const quitY = resumeY + btnH + btnGap;
+  const quitX = W/2 - btnW/2;
+  drawButton(quitX, quitY, btnW, btnH, 'QUIT TO MAIN MENU', '#ff7ad8');
+  pauseOverlayButtons.push({ x: quitX, y: quitY, w: btnW, h: btnH, action: 'quit' });
+
+  // Keyboard hints below
+  ctx.font = '13px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.fillText('keyboard:  P resume   •   Q quit', W/2, quitY + btnH + 30);
   ctx.restore();
 }
 
