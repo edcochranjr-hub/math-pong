@@ -3448,6 +3448,17 @@ function drawTitle() {
     ctx.fillText('H2H:   ' + h2h.nameA + '  ' + h2h.aWins + '  —  ' + h2h.bWins + '  ' + h2h.nameB, W/2, y);
   }
 
+  // === SIGNATURE — bottom-left corner ("Games By Trey") ===
+  // Small, subtle, never overlaps anything else (the bottom-center area is
+  // taken by HELP/RECORDS buttons and the mute warning).
+  ctx.save();
+  ctx.font = 'italic bold 11px "Trebuchet MS"';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = 'rgba(255,224,102,0.55)';
+  ctx.fillText('Games By Trey', 14, H - 8);
+  ctx.restore();
+
   // === EASTER EGG (small, just above the multi-choice line on the right) ===
   // Visually small (18px) so it doesn't dominate, but the tap hitbox is a
   // generous 44x44 so it's still easy to find with a thumb.
