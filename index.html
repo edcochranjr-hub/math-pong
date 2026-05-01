@@ -851,6 +851,10 @@ let keypadHitboxes = [];
 let hudPauseHitbox = null;
 // Pause overlay tap buttons (Resume / Quit). Set in drawPauseOverlay.
 let pauseOverlayButtons = [];
+// Practice menu tap buttons (op chevrons, start, back).
+let practiceMenuButtons = [];
+// Custom setup tap targets (op toggles, difficulty chevrons, start, back).
+let customSetupButtons = [];
 
 function hitTest(x, y, box) {
   return box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
@@ -973,6 +977,56 @@ canvas.addEventListener('click', (e) => {
   // Name entry — tap anywhere acts like Enter (advance to next side or start the game)
   if (game.state === STATES.NAME_ENTRY) {
     handleNameEntryKey({ key: 'Enter', preventDefault: () => {} });
+    return;
+  }
+
+  // Practice menu — tap chevrons / START / BACK
+  if (game.state === STATES.PRACTICE_MENU) {
+    for (const btn of practiceMenuButtons) {
+      if (hitTest(x, y, btn)) {
+        if (btn.action === 'opPrev') {
+          const i = PRACTICE_OPS.indexOf(game.practiceOp);
+          game.practiceOp = PRACTICE_OPS[(i + PRACTICE_OPS.length - 1) % PRACTICE_OPS.length];
+        } else if (btn.action === 'opNext') {
+          const i = PRACTICE_OPS.indexOf(game.practiceOp);
+          game.practiceOp = PRACTICE_OPS[(i + 1) % PRACTICE_OPS.length];
+        } else if (btn.action === 'start') {
+          startPractice();
+        } else if (btn.action === 'back') {
+          game.state = STATES.TITLE;
+        }
+        sfx.type();
+        return;
+      }
+    }
+    return;
+  }
+
+  // Custom setup — tap op rows, chevrons, START / BACK
+  if (game.state === STATES.CUSTOM_SETUP) {
+    for (const btn of customSetupButtons) {
+      if (hitTest(x, y, btn)) {
+        if (btn.action === 'toggleOp') {
+          game.customSetup.ops[btn.op] = !game.customSetup.ops[btn.op];
+        } else if (btn.action === 'diffPrev') {
+          game.customSetup.difficulty = clamp((game.customSetup.difficulty || 2) - 1, 1, 5);
+        } else if (btn.action === 'diffNext') {
+          game.customSetup.difficulty = clamp((game.customSetup.difficulty || 2) + 1, 1, 5);
+        } else if (btn.action === 'start') {
+          const enabled = CUSTOM_OPS_ORDER.filter(o => game.customSetup.ops[o]);
+          if (enabled.length > 0) {
+            persistCustomSetup();
+            startCustom();
+          } else {
+            game.toast = { text: 'PICK AT LEAST ONE OP', t: 1.4, color: '#ff7755' };
+          }
+        } else if (btn.action === 'back') {
+          game.state = STATES.TITLE;
+        }
+        sfx.type();
+        return;
+      }
+    }
     return;
   }
 
@@ -3665,118 +3719,175 @@ function drawNameEntry() {
 }
 
 function drawCustomSetup() {
+  customSetupButtons = [];
   ctx.save();
   ctx.fillStyle = 'rgba(0,0,0,0.85)';
   ctx.fillRect(0, 0, W, H);
 
-  const t = performance.now() / 1000;
+  const narrow = W < 720;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // === TOP: header ===
-  ctx.font = 'bold 56px "Trebuchet MS"';
+  // Header
+  const titleFont = narrow ? Math.min(44, W * 0.10) : 52;
+  ctx.font = 'bold ' + titleFont + 'px "Trebuchet MS"';
   ctx.fillStyle = '#7fff90';
   ctx.shadowColor = '#7fff90';
-  ctx.shadowBlur = 24;
-  ctx.fillText('CUSTOM', W/2, 80);
+  ctx.shadowBlur = 22;
+  ctx.fillText('CUSTOM', W/2, narrow ? 50 : 70);
   ctx.shadowBlur = 0;
 
-  ctx.font = '14px "Trebuchet MS"';
+  ctx.font = (narrow ? 12 : 14) + 'px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('Pick the math you want to practice. Press number keys to toggle.', W/2, 122);
+  ctx.fillText('Tap an op to toggle it. Tap difficulty arrows. Tap START.', W/2, narrow ? 78 : 102);
 
-  // === MIDDLE: op list (centered, left-aligned within the group) ===
-  ctx.font = 'bold 22px "Trebuchet MS"';
+  // === Op rows (each is a tappable cell) ===
+  const opStartY = narrow ? 100 : 130;
+  const rowH = narrow ? 30 : 34;
+  const rowW = Math.min(W - 80, 380);
+  const rowX = W/2 - rowW/2;
+
   ctx.textAlign = 'left';
-  const opStartX = W/2 - 200;
-  const opStartY = 165;
-  const lineH = 34;
   for (let i = 0; i < CUSTOM_OPS_ORDER.length; i++) {
     const op = CUSTOM_OPS_ORDER[i];
     const on = !!game.customSetup.ops[op];
-    const y = opStartY + i * lineH;
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
-    ctx.fillText('[' + (i + 1) + ']', opStartX - 55, y);
-    ctx.fillStyle = on ? '#7fff90' : 'rgba(255,255,255,0.25)';
-    ctx.fillText(on ? '[✓]' : '[ ]', opStartX, y);
-    ctx.fillStyle = on ? '#fff' : 'rgba(255,255,255,0.4)';
-    ctx.fillText(CUSTOM_OP_LABELS[op], opStartX + 60, y);
+    const y = opStartY + i * rowH;
+    const cellHover = hitTest(mouseX, mouseY, { x: rowX, y: y - rowH/2 + 2, w: rowW, h: rowH - 4 });
+
+    // Row pill
+    ctx.fillStyle = on
+      ? (cellHover ? 'rgba(127,255,144,0.30)' : 'rgba(127,255,144,0.18)')
+      : (cellHover ? 'rgba(255,255,255,0.14)' : 'rgba(255,255,255,0.06)');
+    ctx.strokeStyle = on ? '#7fff90' : 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = on ? 1.6 : 1.0;
+    roundRect(rowX, y - rowH/2 + 2, rowW, rowH - 4, 7);
+    ctx.fill();
+    ctx.stroke();
+
+    // Index pill
+    ctx.font = 'bold 13px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText('[' + (i + 1) + ']', rowX + 12, y);
+    // Checkbox
+    ctx.fillStyle = on ? '#7fff90' : 'rgba(255,255,255,0.35)';
+    ctx.fillText(on ? '[✓]' : '[ ]', rowX + 50, y);
+    // Label
+    ctx.font = 'bold ' + (narrow ? 17 : 20) + 'px "Trebuchet MS"';
+    ctx.fillStyle = on ? '#fff' : 'rgba(255,255,255,0.5)';
+    ctx.fillText(CUSTOM_OP_LABELS[op], rowX + 100, y);
+
+    customSetupButtons.push({ x: rowX, y: y - rowH/2, w: rowW, h: rowH, action: 'toggleOp', op });
   }
 
-  // === BOTTOM-ANCHORED: difficulty, hints, help ===
-  // (Anchored from H so the layout breathes the same on any window height.)
+  // === Difficulty (chevrons + label) ===
   ctx.textAlign = 'center';
+  const diffY = opStartY + CUSTOM_OPS_ORDER.length * rowH + (narrow ? 28 : 36);
+  const chevSize = 38;
 
-  // Help text at very bottom
-  ctx.font = '12px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,0.45)';
-  ctx.fillText('Custom mode: solo, no scoring, no auto-leveling.', W/2, H - 30);
-
-  // Keyboard hints above help
-  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  ctx.font = 'bold 16px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.fillText('SPACE  start   •   ESC  back   •   1-6  toggle   •   ◀▶  difficulty', W/2, H - 65);
-
-  // Difficulty section, with breathing room above the hints
-  const diffValueY = H - 130;
-  const diffLabelY = diffValueY - 36;
-
-  ctx.font = 'bold 13px "Trebuchet MS"';
+  ctx.font = 'bold 12px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText('◀ ▶   DIFFICULTY (number magnitudes)', W/2, diffLabelY);
+  ctx.fillText('DIFFICULTY (number magnitudes)', W/2, diffY - 28);
 
-  ctx.font = 'bold 22px "Trebuchet MS"';
+  const chevOffset = narrow ? Math.min(W * 0.32, 130) : 180;
+  const lDiff = drawChevButton(W/2 - chevOffset, diffY, chevSize, '◀');
+  customSetupButtons.push(Object.assign({ action: 'diffPrev' }, lDiff));
+  const rDiff = drawChevButton(W/2 + chevOffset, diffY, chevSize, '▶');
+  customSetupButtons.push(Object.assign({ action: 'diffNext' }, rDiff));
+
+  ctx.font = 'bold ' + (narrow ? 18 : 22) + 'px "Trebuchet MS"';
   const dColor = ['#7fff90', '#a5e264', '#ffe066', '#ff9d50', '#ff5577'][game.customSetup.difficulty - 1];
   ctx.fillStyle = dColor;
   ctx.shadowColor = dColor;
   ctx.shadowBlur = 14;
-  const dLabel = (game.customSetup.difficulty) + '.   ' + CUSTOM_DIFF_LABELS[game.customSetup.difficulty - 1];
-  ctx.fillText(dLabel, W/2, diffValueY);
+  const dLabel = game.customSetup.difficulty + '.   ' + CUSTOM_DIFF_LABELS[game.customSetup.difficulty - 1];
+  ctx.fillText(dLabel, W/2, diffY);
   ctx.shadowBlur = 0;
+
+  // === START + BACK buttons ===
+  const startBtnW = Math.min(280, W - 60);
+  const startBtnH = narrow ? 46 : 54;
+  const startY = diffY + (narrow ? 40 : 50);
+  const startX = W/2 - startBtnW/2;
+  drawButton(startX, startY, startBtnW, startBtnH, 'START', '#7fff90');
+  customSetupButtons.push({ x: startX, y: startY, w: startBtnW, h: startBtnH, action: 'start' });
+
+  const backBtnW = Math.min(180, W - 60);
+  const backBtnH = 38;
+  const backY = startY + startBtnH + 12;
+  const backX = W/2 - backBtnW/2;
+  drawButton(backX, backY, backBtnW, backBtnH, 'BACK', '#ff7ad8');
+  customSetupButtons.push({ x: backX, y: backY, w: backBtnW, h: backBtnH, action: 'back' });
 
   ctx.restore();
 }
 
 function drawPracticeMenu() {
+  practiceMenuButtons = [];
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
   ctx.fillRect(0, 0, W, H);
 
-  const t = performance.now() / 1000;
+  const narrow = W < 720;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  ctx.font = 'bold 80px "Trebuchet MS"';
+  // Title
+  const titleFont = narrow ? Math.min(56, W * 0.13) : 72;
+  ctx.font = 'bold ' + titleFont + 'px "Trebuchet MS"';
   ctx.fillStyle = '#ffe066';
   ctx.shadowColor = '#ffe066';
-  ctx.shadowBlur = 32;
-  ctx.fillText('PRACTICE', W/2, H/2 - 150);
+  ctx.shadowBlur = 28;
+  ctx.fillText('PRACTICE', W/2, narrow ? 80 : 100);
   ctx.shadowBlur = 0;
 
-  ctx.font = '18px "Trebuchet MS"';
+  ctx.font = (narrow ? 13 : 16) + 'px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('No scoring, no opponent. Just rapid problems with a streak counter.', W/2, H/2 - 90);
-  ctx.fillText('Time pressure still applies — but the digit floor keeps it fair.', W/2, H/2 - 64);
+  ctx.fillText('Drill one operation. No score, just a streak.', W/2, narrow ? 122 : 152);
 
-  // Op cycler
-  ctx.font = 'bold 32px "Trebuchet MS"';
-  const arrowBlink = (Math.floor(t * 2.5) % 2) ? 1 : 0.55;
-  ctx.fillStyle = 'rgba(255,255,255,' + arrowBlink + ')';
-  ctx.fillText('◀', W/2 - 240, H/2 + 20);
-  ctx.fillText('▶', W/2 + 240, H/2 + 20);
+  // Op chevrons + label
+  const chevSize = 48;
+  const labelMaxW = narrow ? Math.min(W - 160, 320) : 360;
+  const chevOffset = labelMaxW / 2 + 30;
+  const opY = narrow ? 220 : 260;
 
-  ctx.font = 'bold 36px "Trebuchet MS"';
+  const leftHB = drawChevButton(W/2 - chevOffset, opY, chevSize, '◀');
+  practiceMenuButtons.push(Object.assign({ action: 'opPrev' }, leftHB));
+  const rightHB = drawChevButton(W/2 + chevOffset, opY, chevSize, '▶');
+  practiceMenuButtons.push(Object.assign({ action: 'opNext' }, rightHB));
+
+  ctx.font = 'bold ' + (narrow ? 24 : 32) + 'px "Trebuchet MS"';
   ctx.fillStyle = '#7fff90';
   ctx.shadowColor = '#7fff90';
-  ctx.shadowBlur = 18;
-  ctx.fillText(PRACTICE_OP_LABELS[game.practiceOp], W/2, H/2 + 20);
+  ctx.shadowBlur = 16;
+  ctx.fillText(PRACTICE_OP_LABELS[game.practiceOp], W/2, opY);
   ctx.shadowBlur = 0;
 
-  ctx.font = 'bold 20px "Trebuchet MS"';
-  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.fillText('SPACE  to start   •   ESC  to back', W/2, H/2 + 110);
+  // Caption under op
+  ctx.font = '12px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.fillText('tap arrows to change', W/2, opY + 38);
+
+  // START button (big green)
+  const btnW = Math.min(280, W - 60);
+  const btnH = 54;
+  const startY = opY + 90;
+  const startX = W/2 - btnW/2;
+  drawButton(startX, startY, btnW, btnH, 'START PRACTICE', '#7fff90');
+  practiceMenuButtons.push({ x: startX, y: startY, w: btnW, h: btnH, action: 'start' });
+
+  // BACK button (smaller pink)
+  const backW = Math.min(180, W - 60);
+  const backH = 42;
+  const backY = startY + btnH + 14;
+  const backX = W/2 - backW/2;
+  drawButton(backX, backY, backW, backH, 'BACK', '#ff7ad8');
+  practiceMenuButtons.push({ x: backX, y: backY, w: backW, h: backH, action: 'back' });
+
+  // Keyboard hint
+  ctx.font = '12px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.fillText('keyboard:  ◀ ▶  cycle op   •   SPACE  start   •   ESC  back', W/2, backY + backH + 22);
+
   ctx.restore();
 }
 
