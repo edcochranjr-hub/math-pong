@@ -324,6 +324,12 @@ function namesAreDefault() {
   return store.names.left === 'PLAYER 1' || store.names.right === 'PLAYER 2';
 }
 
+// True when running on a touch device that's currently in portrait orientation.
+// Used to nudge the user to rotate (Pong needs the width).
+function isPortraitMobile() {
+  return isTouchDevice && H > W * 1.05;
+}
+
 // Centralized "user wants to start the game" action. Called from SPACE keypress
 // AND from the click handler (tap-to-start on touch devices).
 function startGameFlow() {
@@ -827,6 +833,17 @@ canvas.addEventListener('click', (e) => {
     game.state = STATES.TITLE;
     sfx.type();
     return;
+  }
+
+  // Pong with portrait-rotate prompt — tap "Back to menu" to bail
+  if (game.state === STATES.PONG && isPortraitMobile() && game._rotateBackBtn) {
+    if (hitTest(x, y, game._rotateBackBtn)) {
+      game.pong = null;
+      game.state = STATES.TITLE;
+      game._rotateBackBtn = null;
+      sfx.type();
+      return;
+    }
   }
 
   // Easter message — tap anywhere starts standalone Pong
@@ -1752,6 +1769,8 @@ function pongFinish(winnerSide) {
 function updatePong(dt) {
   const p = game.pong;
   if (!p) return;
+  // Pong needs landscape on mobile — freeze physics until rotated.
+  if (isPortraitMobile()) return;
   // Intro grace period: paddles move but ball waits
   if (p.intro > 0) p.intro -= dt;
 
@@ -1859,6 +1878,13 @@ function updatePong(dt) {
 function drawPong() {
   const p = game.pong;
   if (!p) return;
+
+  // On a portrait-orientation phone Pong is painfully cramped. Show a rotate
+  // prompt instead and freeze the action until the user turns sideways.
+  if (isPortraitMobile()) {
+    drawRotatePrompt('Pong needs landscape mode for room to play');
+    return;
+  }
 
   // Court background — slightly different vibe than math game
   const g = ctx.createLinearGradient(0, 0, 0, H);
@@ -1993,6 +2019,59 @@ function drawPong() {
     ctx.fillText(p.standalone ? 'Returning to menu...' : 'Math match resumes...', W/2, H/2 + 40);
     ctx.restore();
   }
+}
+
+function drawRotatePrompt(reason) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.94)';
+  ctx.fillRect(0, 0, W, H);
+
+  const t = performance.now() / 1000;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Animated rotating arrow icon
+  ctx.save();
+  ctx.translate(W/2, H/2 - 110);
+  ctx.rotate(Math.sin(t * 1.5) * 0.4);
+  ctx.font = 'bold 96px "Trebuchet MS"';
+  ctx.fillStyle = '#7fff90';
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = 30;
+  ctx.fillText('⟳', 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+
+  ctx.font = 'bold 32px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Rotate your phone', W/2, H/2 - 10);
+  ctx.fillText('sideways', W/2, H/2 + 28);
+
+  ctx.font = '16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.65)';
+  ctx.fillText(reason, W/2, H/2 + 80);
+
+  // Tappable "Back to menu" button
+  const btnW = Math.min(240, W - 40);
+  const btnH = 44;
+  const btnX = W/2 - btnW/2;
+  const btnY = H - 80;
+  ctx.save();
+  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.6;
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  ctx.strokeStyle = 'rgba(255,255,255,' + blink + ')';
+  ctx.lineWidth = 2;
+  roundRect(btnX, btnY, btnW, btnH, 10);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = 'bold 16px "Trebuchet MS"';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Back to menu', W/2, btnY + btnH/2);
+  ctx.restore();
+  // Stash hitbox so click handler can dismiss
+  game._rotateBackBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+  ctx.restore();
 }
 
 function setupGameOverPhrases() {
@@ -2489,24 +2568,40 @@ function drawProblem() {
   const cur = game.current;
   const side = cur.side;
   const accent = side === 'left' ? '#56e2ff' : '#ff7ad8';
-  // On narrow screens the panel takes the full width and centers — too small
-  // otherwise (multi-choice cells become unreadable on phones).
   const narrow = W < 720;
-  const halfX = narrow ? W / 2 : (side === 'left' ? W * 0.27 : W * 0.73);
-
-  ctx.save();
-  const panelW = narrow ? Math.min(W - 30, 560) : Math.min(W * 0.42, 560);
-  // Multi-choice needs more vertical room for the 2x2 grid.
-  const panelH = cur.problem.choices ? 340 : 280;
-  const panelX = halfX - panelW/2;
-  // In typing mode we render an on-screen number keypad below the panel so
-  // touch / tablet players can input answers without a hardware keyboard.
-  // Reserve vertical room for it and shift the panel up when in type mode.
   const isCPU = game.mode === 'versus1p' && side === 'right';
   const showKeypad = !cur.problem.choices && !isCPU;
-  const keypadH = showKeypad ? 268 : 0;
-  const totalContentH = panelH + (showKeypad ? 14 + keypadH : 0);
-  const panelY = clamp(Math.round(H/2 - totalContentH/2), 50, H - totalContentH - 12);
+  // When the viewport is short (landscape phone) and we'd be showing the
+  // keypad, lay panel + keypad out side-by-side so both fit. Otherwise the
+  // default vertical-stack layout (panel above, keypad below).
+  const sideBySideKeypad = showKeypad && H < 560 && W >= 600;
+  const panelH = cur.problem.choices ? 340 : 280;
+
+  let halfX, panelX, panelY, panelW, kpX, kpY, kpAreaW;
+
+  if (sideBySideKeypad) {
+    // Landscape-phone layout: panel on the left, keypad on the right
+    const margin = 14;
+    panelW = Math.min(W * 0.46 - margin, 480);
+    panelX = (W / 2) - panelW - margin / 2;
+    halfX = panelX + panelW / 2;
+    panelY = clamp((H - panelH) / 2, 8, H - panelH - 8);
+    kpAreaW = Math.min(W * 0.46 - margin, 480);
+    kpX = (W / 2) + margin / 2;
+    kpY = clamp((H - 268) / 2, 8, H - 268 - 8);
+  } else {
+    // Default layout: panel centered (narrow) or to one side (wide), keypad below
+    halfX = narrow ? W / 2 : (side === 'left' ? W * 0.27 : W * 0.73);
+    panelW = narrow ? Math.min(W - 30, 560) : Math.min(W * 0.42, 560);
+    panelX = halfX - panelW / 2;
+    const totalContentH = panelH + (showKeypad ? 14 + 268 : 0);
+    panelY = clamp(Math.round(H / 2 - totalContentH / 2), 50, H - totalContentH - 12);
+    kpAreaW = 440;
+    kpX = W / 2 - kpAreaW / 2;
+    kpY = panelY + panelH + 14;
+  }
+
+  ctx.save();
   ctx.shadowColor = accent;
   ctx.shadowBlur = 24;
   ctx.fillStyle = 'rgba(10, 10, 30, 0.78)';
@@ -2626,7 +2721,7 @@ function drawProblem() {
 
   // === ON-SCREEN NUMBER KEYPAD (typing mode only, hidden during CPU's turn) ===
   if (showKeypad) {
-    drawKeypad(panelY + panelH + 14);
+    drawKeypad(kpX, kpY, kpAreaW);
   } else {
     keypadHitboxes = [];
   }
@@ -2634,11 +2729,11 @@ function drawProblem() {
 
 // Render a 3-column number keypad with backspace, negative, and a wide SUBMIT
 // button. Updates keypadHitboxes for the click handler.
-function drawKeypad(yTop) {
+function drawKeypad(xLeft, yTop, areaW) {
   keypadHitboxes = [];
   const cols = 3;
-  const padW = Math.min(W * 0.86, 440);
-  const padX = W/2 - padW/2;
+  const padW = Math.min(areaW - 6, 440);
+  const padX = xLeft + (areaW - padW) / 2;
   const gap = 8;
   const keyW = (padW - gap * (cols - 1)) / cols;
   const keyH = 44;
@@ -2765,6 +2860,13 @@ function drawTitle() {
   ctx.fillStyle = 'rgba(255,255,255,0.75)';
   ctx.fillText('Solve fast — the quicker you answer, the LESS time the other player gets.', W/2, 156);
   ctx.fillText('5 in a row triggers SPECIAL effects.', W/2, 174);
+
+  // Friendly nudge for phones held in portrait — Pong needs landscape.
+  if (isPortraitMobile()) {
+    ctx.font = 'bold 12px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,224,102,0.85)';
+    ctx.fillText('Tip: turn your phone sideways for the best experience', W/2, 192);
+  }
 
   // === MODE + DIFFICULTY ===
   // On wide screens these sit side-by-side. On narrow (phones / portrait) they
