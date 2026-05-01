@@ -747,6 +747,8 @@ let titleButtons = [];
 let mcChoiceHitboxes = [];
 // Title-screen extra hitboxes (chevrons, MC toggle, names line). Refreshed in drawTitle.
 let titleExtras = {};
+// On-screen number keypad (typing mode on touch). Refreshed in drawProblem.
+let keypadHitboxes = [];
 
 function hitTest(x, y, box) {
   return box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
@@ -846,17 +848,44 @@ canvas.addEventListener('click', (e) => {
     return;
   }
 
-  // Problem state with multi-choice — tap a choice cell to pick it
-  if (game.state === STATES.PROBLEM && game.current && game.current.problem.choices) {
+  // Problem state — multi-choice OR on-screen keypad (typing mode)
+  if (game.state === STATES.PROBLEM && game.current) {
     if (game.paused) return;
     if (game.mode === 'versus1p' && game.current.side === 'right') return; // CPU's turn
-    for (let i = 0; i < mcChoiceHitboxes.length; i++) {
-      if (hitTest(x, y, mcChoiceHitboxes[i])) {
-        const cur = game.current;
-        cur.typed = String(cur.problem.choices[i]);
-        sfx.type();
-        submitAnswer();
-        return;
+    const cur = game.current;
+    if (cur.submitted) return;
+
+    if (cur.problem.choices) {
+      // Multi-choice: tap a cell to pick it
+      for (let i = 0; i < mcChoiceHitboxes.length; i++) {
+        if (hitTest(x, y, mcChoiceHitboxes[i])) {
+          cur.typed = String(cur.problem.choices[i]);
+          sfx.type();
+          submitAnswer();
+          return;
+        }
+      }
+    } else {
+      // Typing mode: tap on the on-screen number keypad
+      for (const k of keypadHitboxes) {
+        if (hitTest(x, y, k)) {
+          if (k.key === 'SUBMIT') {
+            sfx.type();
+            submitAnswer();
+          } else if (k.key === '⌫') {
+            cur.typed = cur.typed.slice(0, -1);
+            sfx.type();
+          } else if (k.key === '−') {
+            if (cur.typed.length === 0) { cur.typed = '-'; sfx.type(); }
+          } else if (/^[0-9]$/.test(k.key)) {
+            if (cur.typed.length < 8) {
+              cur.typed += k.key;
+              sfx.type();
+              checkAutoSubmit();
+            }
+          }
+          return;
+        }
       }
     }
     return;
@@ -2470,7 +2499,14 @@ function drawProblem() {
   // Multi-choice needs more vertical room for the 2x2 grid.
   const panelH = cur.problem.choices ? 340 : 280;
   const panelX = halfX - panelW/2;
-  const panelY = H/2 - panelH/2;
+  // In typing mode we render an on-screen number keypad below the panel so
+  // touch / tablet players can input answers without a hardware keyboard.
+  // Reserve vertical room for it and shift the panel up when in type mode.
+  const isCPU = game.mode === 'versus1p' && side === 'right';
+  const showKeypad = !cur.problem.choices && !isCPU;
+  const keypadH = showKeypad ? 268 : 0;
+  const totalContentH = panelH + (showKeypad ? 14 + keypadH : 0);
+  const panelY = clamp(Math.round(H/2 - totalContentH/2), 50, H - totalContentH - 12);
   ctx.shadowColor = accent;
   ctx.shadowBlur = 24;
   ctx.fillStyle = 'rgba(10, 10, 30, 0.78)';
@@ -2481,7 +2517,6 @@ function drawProblem() {
   ctx.strokeStyle = accent;
   ctx.stroke();
 
-  const isCPU = game.mode === 'versus1p' && side === 'right';
   const playerName = side === 'left' ? game.paddleL.name : game.paddleR.name;
   const headerText = isCPU ? 'CPU — THINKING…' : (playerName + ' — SOLVE!');
 
@@ -2587,6 +2622,70 @@ function drawProblem() {
   ctx.font = 'bold 16px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.7)';
   ctx.fillText(cur.timeRemaining.toFixed(1) + 's  /  ' + cur.timeLimit.toFixed(1) + 's', halfX, barY - 8);
+  ctx.restore();
+
+  // === ON-SCREEN NUMBER KEYPAD (typing mode only, hidden during CPU's turn) ===
+  if (showKeypad) {
+    drawKeypad(panelY + panelH + 14);
+  } else {
+    keypadHitboxes = [];
+  }
+}
+
+// Render a 3-column number keypad with backspace, negative, and a wide SUBMIT
+// button. Updates keypadHitboxes for the click handler.
+function drawKeypad(yTop) {
+  keypadHitboxes = [];
+  const cols = 3;
+  const padW = Math.min(W * 0.86, 440);
+  const padX = W/2 - padW/2;
+  const gap = 8;
+  const keyW = (padW - gap * (cols - 1)) / cols;
+  const keyH = 44;
+
+  const layout = ['7','8','9','4','5','6','1','2','3','−','0','⌫'];
+  for (let i = 0; i < layout.length; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const kx = padX + c * (keyW + gap);
+    const ky = yTop + r * (keyH + gap);
+    drawKey(kx, ky, keyW, keyH, layout[i], false);
+    keypadHitboxes.push({ x: kx, y: ky, w: keyW, h: keyH, key: layout[i] });
+  }
+
+  // Submit row spans the full keypad width
+  const submitY = yTop + 4 * (keyH + gap);
+  const submitH = 50;
+  drawKey(padX, submitY, padW, submitH, 'SUBMIT', true);
+  keypadHitboxes.push({ x: padX, y: submitY, w: padW, h: submitH, key: 'SUBMIT' });
+}
+
+function drawKey(x, y, w, h, label, isSubmit) {
+  const hovered = hitTest(mouseX, mouseY, { x, y, w, h });
+  ctx.save();
+  if (isSubmit) {
+    const grad = ctx.createLinearGradient(x, y, x, y + h);
+    grad.addColorStop(0, hovered ? 'rgba(127,255,144,0.40)' : 'rgba(127,255,144,0.22)');
+    grad.addColorStop(1, hovered ? 'rgba(127,255,144,0.18)' : 'rgba(127,255,144,0.06)');
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = '#7fff90';
+    ctx.lineWidth = hovered ? 2.5 : 1.6;
+    ctx.shadowColor = '#7fff90';
+    ctx.shadowBlur = hovered ? 18 : 0;
+  } else {
+    ctx.fillStyle = hovered ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.10)';
+    ctx.strokeStyle = hovered ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.30)';
+    ctx.lineWidth = 1.4;
+  }
+  roundRect(x, y, w, h, 9);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.font = 'bold ' + Math.round(h * (isSubmit ? 0.42 : 0.5)) + 'px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = isSubmit ? '#7fff90' : '#fff';
+  ctx.fillText(label, x + w/2, y + h/2);
   ctx.restore();
 }
 
