@@ -1106,11 +1106,12 @@ canvas.addEventListener('click', (e) => {
       sfx.type();
       return;
     }
-    // HELP / RECORDS buttons
+    // Title buttons (HELP, RECORDS, START)
     for (const btn of titleButtons) {
       if (hitTest(x, y, btn)) {
-        if (btn.action === 'help')    game.state = STATES.HELP;
+        if (btn.action === 'help')         game.state = STATES.HELP;
         else if (btn.action === 'records') game.state = STATES.RECORDS;
+        else if (btn.action === 'start')   startGameFlow();
         sfx.type();
         return;
       }
@@ -1147,8 +1148,9 @@ canvas.addEventListener('click', (e) => {
       sfx.type();
       return;
     }
-    // Anywhere else — start the game (tap-to-start for mobile)
-    startGameFlow();
+    // Anywhere else — DOES NOTHING. The big START GAME button is the only
+    // path to begin (besides keyboard SPACE/Enter). Prevents accidental taps
+    // from launching a game mid-configuration.
     return;
   }
 });
@@ -3302,16 +3304,24 @@ function drawTitle() {
   titleExtras.mcToggle = { x: W/2 - mcLineW/2 - 12, y: y - 14, w: mcLineW + 24, h: 28 };
   y -= 36;
 
-  // SPACE to start / set up (large, blinking)
-  const startMsg = (game.mode === 'practice' || game.mode === 'custom') ? 'SPACE to set up' : 'SPACE to start';
-  const blink = (Math.floor(t * 2) % 2) ? 1 : 0.45;
-  ctx.font = 'bold 24px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.shadowColor = '#fff';
-  ctx.shadowBlur = 16;
-  ctx.fillText(startMsg, W/2, y);
-  ctx.shadowBlur = 0;
-  y -= 42;
+  // === BIG START BUTTON ===
+  // The ONLY way to begin a game (besides keyboard SPACE/Enter). No more
+  // tap-anywhere starts — too easy to trigger accidentally.
+  const startBtnW = Math.min(320, W - 60);
+  const startBtnH = 58;
+  const startBtnX = W/2 - startBtnW/2;
+  const startBtnY = y - startBtnH;
+  const startLabel = (game.mode === 'practice' || game.mode === 'custom')
+    ? 'NEXT  →  SET UP'
+    : 'START GAME';
+  // Subtle pulse to draw the eye
+  const pulse = 0.85 + 0.15 * Math.sin(t * 2);
+  ctx.save();
+  ctx.globalAlpha = pulse;
+  drawButton(startBtnX, startBtnY, startBtnW, startBtnH, startLabel, '#7fff90');
+  ctx.restore();
+  titleButtons.push({ x: startBtnX, y: startBtnY, w: startBtnW, h: startBtnH, action: 'start' });
+  y = startBtnY - 18;
 
   // press [N] to rename
   ctx.font = '12px "Trebuchet MS"';
