@@ -159,7 +159,7 @@ The message and trigger live in the `EASTER_MESSAGE` constant near the top of `i
 
 ## Pong bonus round
 
-Hit a **15-correct streak** during a versus match and you unlock a **bonus Pong round** that plays *after* the math match ends. Doesn't interrupt the game. First to **3 points** wins, then back to title. (The earlier "interlude" version that fired mid-match has been removed — pong only plays after the math match completes.)
+When a versus match racks up **15 total correct answers** between both players (e.g. one side hits 8 and the other 7), you unlock a **bonus Pong round** that plays *after* the math match ends. Doesn't interrupt the game. First to **3 points** wins, then back to title. (The earlier "interlude" version that fired mid-match has been removed — pong only plays after the math match completes.)
 
 Controls:
 - **Left paddle:** `W` (up) / `S` (down)

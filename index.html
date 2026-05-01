@@ -143,11 +143,12 @@ const STATES = {
 // Edit freely — kept as a single string so wrapping is automatic.
 const EASTER_MESSAGE = "Hey Trey! Dad loves you buddy, thanks for helping me build this cool game. Your ideas are awesome! Great football practice Thursday MR MVP!!! I love you and am proud of you. Me and Mom both are so lucky you are our son and the biggest brother to the 3 littles. Love ya buddy brewski ole brodal walker, mr broc-lee. Have fun this weekend!";
 
-// Pong bonus tuning — earned by hitting a STREAK_TRIGGER-long correct streak
-// during a versus match. Plays AFTER the match ends (not as a mid-match
-// interlude), as a celebratory bonus round.
+// Pong bonus tuning — earned when the match accumulates TOTAL_TRIGGER
+// correct answers across both players (e.g. one side hits 8 correct and the
+// other hits 7 = 15 total → unlock). Plays AFTER the match ends as a
+// celebratory bonus round, not as a mid-match interlude.
 const PONG = {
-  STREAK_TRIGGER: 15, // consecutive correct answers needed to unlock bonus pong
+  TOTAL_TRIGGER: 15, // total correct answers (both sides combined) needed for bonus pong
   WIN_SCORE: 3,
   PADDLE_W: 18,
   PADDLE_H: 110,
@@ -1383,12 +1384,13 @@ function onCorrect() {
   store.stats.bestStreak = Math.max(store.stats.bestStreak || 0, game.streak[side]);
   saveStore();
 
-  // Bonus Pong unlock: hit a 15-streak in a versus match, get a Pong round
-  // after the match ends as a reward. Doesn't interrupt the math game.
+  // Bonus Pong unlock: when the match accumulates 15 correct answers across
+  // both players, queue a Pong round to play AFTER the match ends. Doesn't
+  // interrupt the math game.
   const isVersus = game.mode === 'versus2p' || game.mode === 'versus1p';
-  if (isVersus && !game.pongEarned && game.streak[side] >= PONG.STREAK_TRIGGER) {
+  if (isVersus && !game.pongEarned && game.totalCorrect >= PONG.TOTAL_TRIGGER) {
     game.pongEarned = true;
-    game.toast = { text: 'PONG BONUS EARNED!  ' + game.streak[side] + ' IN A ROW!', t: 2.4, color: '#7fff90' };
+    game.toast = { text: 'PONG BONUS UNLOCKED!  (' + game.totalCorrect + ' correct so far)', t: 2.4, color: '#7fff90' };
     if (!store.muted) sfx.spectacle();
   }
 
@@ -3624,7 +3626,7 @@ function drawGameOver() {
     ctx.fillStyle = '#7fff90';
     ctx.shadowColor = '#7fff90';
     ctx.shadowBlur = 18;
-    ctx.fillText('15-STREAK BONUS!', W/2, pressSpaceY - 10);
+    ctx.fillText('15-CORRECT BONUS!', W/2, pressSpaceY - 10);
     ctx.shadowBlur = 0;
     ctx.font = 'bold 26px "Trebuchet MS"';
     ctx.fillStyle = 'rgba(127,255,144,' + blink + ')';
