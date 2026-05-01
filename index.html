@@ -146,6 +146,10 @@ const STATES = {
 // Edit freely — kept as a single string so wrapping is automatic.
 const EASTER_MESSAGE = "Hey Trey! Dad loves you buddy, thanks for helping me build this cool game. Your ideas are awesome! Great football practice Thursday MR MVP!!! I love you and am proud of you. Me and Mom both are so lucky you are our son and the biggest brother to the 3 littles. Love ya buddy brewski ole brodal walker, mr broc-lee. Have fun this weekend!";
 
+// Second easter egg: tap "Games By Trey" credit on the title screen.
+// Just shows a sweet note — no pong afterward.
+const ALBERTA_MESSAGE = "Buddy scadduy, Mom and Dad love you and are so proud of you. Alberta Smith is the right place for you mah boy and we are so proud you chose it :)";
+
 // Pong bonus tuning — earned when the match accumulates TOTAL_TRIGGER
 // correct answers across both players (e.g. one side hits 8 correct and the
 // other hits 7 = 15 total → unlock). Plays AFTER the match ends as a
@@ -990,9 +994,16 @@ canvas.addEventListener('click', (e) => {
     return;
   }
 
-  // Easter message — tap anywhere starts standalone Pong
+  // Easter message — branch on variant
   if (game.state === STATES.EASTER_MESSAGE) {
-    startPongStandalone();
+    if (game.easterContext === 'alberta') {
+      // Trey-credit message: just goes back to title
+      game.state = STATES.TITLE;
+      sfx.type();
+    } else {
+      // Default (pong-egg) variant: tap launches standalone Pong
+      startPongStandalone();
+    }
     return;
   }
 
@@ -1137,6 +1148,7 @@ canvas.addEventListener('click', (e) => {
   if (game.state === STATES.TITLE) {
     // Easter egg
     if (hitTest(x, y, easterEggHitbox)) {
+      game.easterContext = 'pong';
       game.state = STATES.EASTER_MESSAGE;
       sfx.type();
       return;
@@ -1186,6 +1198,13 @@ canvas.addEventListener('click', (e) => {
     if (hitTest(x, y, titleExtras.namesArea)) {
       game.state = STATES.NAME_ENTRY;
       game.nameEntry = { side: 'left', text: store.names.left };
+      sfx.type();
+      return;
+    }
+    // "Games By Trey" credit (second easter egg) — opens Mom & Dad note
+    if (hitTest(x, y, treyCreditHitbox)) {
+      game.easterContext = 'alberta';
+      game.state = STATES.EASTER_MESSAGE;
       sfx.type();
       return;
     }
@@ -1319,6 +1338,7 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault();
     } else if (e.key === 'e' || e.key === 'E') {
       // Easter egg — show the love note then route to standalone Pong.
+      game.easterContext = 'pong';
       game.state = STATES.EASTER_MESSAGE;
       sfx.type();
       e.preventDefault();
@@ -1329,7 +1349,11 @@ window.addEventListener('keydown', (e) => {
   // === EASTER MESSAGE ===
   if (game.state === STATES.EASTER_MESSAGE) {
     if (e.key === ' ' || e.key === 'Enter') {
-      startPongStandalone();
+      if (game.easterContext === 'alberta') {
+        game.state = STATES.TITLE;
+      } else {
+        startPongStandalone();
+      }
       e.preventDefault();
     } else if (e.key === 'Escape') {
       game.state = STATES.TITLE;
@@ -3147,6 +3171,8 @@ function drawKey(x, y, w, h, label, isSubmit) {
 // Hitbox for the easter-egg icon, refreshed every frame in drawTitle. Used by
 // the canvas click/tap handler to decide if a click landed on the egg.
 let easterEggHitbox = null;
+// Hitbox for the "Games By Trey" credit (second easter egg).
+let treyCreditHitbox = null;
 
 function drawEasterEggIcon(cx, cy, size, t) {
   ctx.save();
@@ -3450,7 +3476,8 @@ function drawTitle() {
 
   // === SIGNATURE — bottom-left corner ("Games By Trey") ===
   // Small, subtle, never overlaps anything else (the bottom-center area is
-  // taken by HELP/RECORDS buttons and the mute warning).
+  // taken by HELP/RECORDS buttons and the mute warning). Also a clickable
+  // easter egg — tap it to open a sweet message from Dad.
   ctx.save();
   ctx.font = 'italic bold 11px "Trebuchet MS"';
   ctx.textAlign = 'left';
@@ -3458,6 +3485,8 @@ function drawTitle() {
   ctx.fillStyle = 'rgba(255,224,102,0.55)';
   ctx.fillText('Games By Trey', 14, H - 8);
   ctx.restore();
+  // Generous hitbox for the credit (text is small, give thumbs room)
+  treyCreditHitbox = { x: 6, y: H - 28, w: 150, h: 26 };
 
   // === EASTER EGG (small, just above the multi-choice line on the right) ===
   // Visually small (18px) so it doesn't dominate, but the tap hitbox is a
@@ -3711,8 +3740,12 @@ function drawRecords() {
 }
 
 function drawEasterMessage() {
+  // Two variants: 'pong' (the egg-icon flow → leads into standalone Pong)
+  // and 'alberta' (the Trey-credit flow → just a sweet note, back to title).
+  const variant = game.easterContext || 'pong';
+  const messageText = variant === 'alberta' ? ALBERTA_MESSAGE : EASTER_MESSAGE;
+
   ctx.save();
-  // Soft warm gradient backdrop
   const grad = ctx.createLinearGradient(0, 0, 0, H);
   grad.addColorStop(0, '#1a0420');
   grad.addColorStop(0.6, '#0d1530');
@@ -3734,14 +3767,14 @@ function drawEasterMessage() {
 
   ctx.font = 'italic 16px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText('— from Dad', W/2, 132);
+  ctx.fillText('— from Dad' + (variant === 'alberta' ? ' & Mom' : ''), W/2, 132);
 
   // Word-wrap the message
   ctx.font = '21px "Trebuchet MS"';
   ctx.fillStyle = '#fff';
   const maxWidth = Math.min(W - 80, 900);
   const lineHeight = 32;
-  const words = EASTER_MESSAGE.split(' ');
+  const words = messageText.split(' ');
   const lines = [];
   let currentLine = '';
   for (const word of words) {
@@ -3755,7 +3788,6 @@ function drawEasterMessage() {
   }
   if (currentLine) lines.push(currentLine);
 
-  // Center the block vertically in the available middle area
   const blockTop = 180;
   const blockBottom = H - 130;
   const blockHeight = lines.length * lineHeight;
@@ -3764,18 +3796,20 @@ function drawEasterMessage() {
     ctx.fillText(lines[i], W/2, startY + i * lineHeight);
   }
 
-  // Footer prompts
+  // Footer prompts vary by variant
   const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
   ctx.font = 'bold 22px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(127,255,144,' + blink + ')';
   ctx.shadowColor = '#7fff90';
   ctx.shadowBlur = 14;
-  ctx.fillText('SPACE  to play Pong', W/2, H - 70);
+  ctx.fillText(variant === 'alberta' ? 'TAP / SPACE  to go back' : 'SPACE  to play Pong', W/2, H - 70);
   ctx.shadowBlur = 0;
 
-  ctx.font = '14px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,0.45)';
-  ctx.fillText('ESC  to go back', W/2, H - 38);
+  if (variant === 'pong') {
+    ctx.font = '14px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText('ESC  to go back', W/2, H - 38);
+  }
 
   ctx.restore();
 }
