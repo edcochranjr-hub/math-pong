@@ -2655,8 +2655,8 @@ function update(dt) {
     if (game.stateTimer <= 0) {
       if (game.winnerSide) {
         // Round end (or full-game end) — both route through GAME_OVER, which
-        // displays different copy + dispatches differently based on game.gameOver.
-        if (game.gameOver) setupGameOverPhrases();
+        // displays different copy + dispatches differently based on
+        // game.gameOver. Phrases were already set up in onWrong/timeUp.
         game.state = STATES.GAME_OVER;
         sfx.score();
       } else if (game.mode === 'practice') {
@@ -2914,16 +2914,11 @@ function drawHUD() {
     ctx.font = 'bold 14px "Trebuchet MS"';
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     const modeTag = game.mode === 'versus1p' ? '1P vs CPU' : '2 PLAYER';
-    ctx.fillText('FIRST TO ' + WIN_SCORE + '  •  ' + curDiff().name.replace(/\s+/g, ' ') + '  •  ' + modeTag, W/2, 56);
-    // Best-of-5 round indicator
-    ctx.font = 'bold 13px "Trebuchet MS"';
-    ctx.fillStyle = 'rgba(255,224,102,0.75)';
-    ctx.fillText(
-      'ROUND ' + (game.roundNumber || 1) + ' — best of 5  ·  ' +
-      game.paddleL.name + ' ' + (game.matchRounds.left || 0) +
-      '  —  ' + (game.matchRounds.right || 0) + ' ' + game.paddleR.name,
-      W/2, 76
-    );
+    // Single line packs round + best-of-5 score + first-to-N + mode info.
+    const roundInfo = 'ROUND ' + (game.roundNumber || 1) + ' of 5  ·  ' +
+                      (game.matchRounds.left || 0) + '–' + (game.matchRounds.right || 0) +
+                      '  ·  to ' + WIN_SCORE + '  ·  ' + modeTag;
+    ctx.fillText(roundInfo, W/2, 56);
   }
   ctx.restore();
 
@@ -2951,14 +2946,13 @@ function drawHUD() {
     ctx.restore();
   }
 
-  // === PAUSE BUTTON (top-center, below the round-score line) ===
+  // === PAUSE BUTTON (top-center, just below the level/round info line) ===
   // Tappable on touch, also serves as a visible cue on desktop. Hidden on
   // game-over since there's nothing to pause then.
   if (game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT) {
     const pbW = 90, pbH = 28;
     const pbX = W/2 - pbW/2;
-    // Pushed down to clear the new "ROUND N — best of 5" line at y=76.
-    const pbY = narrow ? 100 : 106;
+    const pbY = narrow ? 80 : 86;
     const hovered = hitTest(mouseX, mouseY, { x: pbX, y: pbY, w: pbW, h: pbH });
     ctx.save();
     ctx.fillStyle = hovered ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.08)';
@@ -3048,7 +3042,11 @@ function drawProblem() {
     panelW = narrow ? Math.min(W - 30, 560) : Math.min(W * 0.42, 560);
     panelX = halfX - panelW / 2;
     const totalContentH = panelH + (showKeypad ? 14 + 268 : 0);
-    panelY = clamp(Math.round(H / 2 - totalContentH / 2), 50, H - totalContentH - 12);
+    // On narrow screens the panel covers the full center horizontally, so
+    // its top can't intrude on the HUD lines (level / round info / pause
+    // button at y≈80). Push min Y down to ~124 to clear those.
+    const minY = narrow ? 124 : 50;
+    panelY = clamp(Math.round(H / 2 - totalContentH / 2), minY, H - totalContentH - 12);
     kpAreaW = 440;
     kpX = W / 2 - kpAreaW / 2;
     kpY = panelY + panelH + 14;
