@@ -3304,7 +3304,7 @@ function drawTitle() {
   titleExtras.mcToggle = { x: W/2 - mcLineW/2 - 12, y: y - 14, w: mcLineW + 24, h: 28 };
   y -= 36;
 
-  // === BIG START BUTTON ===
+  // === BIG START BUTTON (solid green, always visible) ===
   // The ONLY way to begin a game (besides keyboard SPACE/Enter). No more
   // tap-anywhere starts — too easy to trigger accidentally.
   const startBtnW = Math.min(320, W - 60);
@@ -3314,11 +3314,27 @@ function drawTitle() {
   const startLabel = (game.mode === 'practice' || game.mode === 'custom')
     ? 'NEXT  →  SET UP'
     : 'START GAME';
-  // Subtle pulse to draw the eye
-  const pulse = 0.85 + 0.15 * Math.sin(t * 2);
+  const sbHover = hitTest(mouseX, mouseY, { x: startBtnX, y: startBtnY, w: startBtnW, h: startBtnH });
   ctx.save();
-  ctx.globalAlpha = pulse;
-  drawButton(startBtnX, startBtnY, startBtnW, startBtnH, startLabel, '#7fff90');
+  // Green-filled gradient body — always visible (not just on hover)
+  const sbGrad = ctx.createLinearGradient(startBtnX, startBtnY, startBtnX, startBtnY + startBtnH);
+  sbGrad.addColorStop(0, sbHover ? 'rgba(127,255,144,0.55)' : 'rgba(127,255,144,0.35)');
+  sbGrad.addColorStop(1, sbHover ? 'rgba(127,255,144,0.18)' : 'rgba(127,255,144,0.08)');
+  ctx.fillStyle = sbGrad;
+  ctx.strokeStyle = '#7fff90';
+  ctx.lineWidth = sbHover ? 3 : 2;
+  // Pulsing glow draws the eye without changing the button's opacity
+  ctx.shadowColor = '#7fff90';
+  ctx.shadowBlur = sbHover ? 32 : (18 + 10 * Math.sin(t * 2.4));
+  roundRect(startBtnX, startBtnY, startBtnW, startBtnH, 14);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(startLabel, startBtnX + startBtnW/2, startBtnY + startBtnH/2);
   ctx.restore();
   titleButtons.push({ x: startBtnX, y: startBtnY, w: startBtnW, h: startBtnH, action: 'start' });
   y = startBtnY - 18;
