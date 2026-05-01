@@ -942,8 +942,9 @@ canvas.addEventListener('click', (e) => {
     }
   }
 
-  // HUD pause button — tap during PROBLEM / BALL / RESULT states
-  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT;
+  // HUD pause button — tap during PROBLEM / BALL / RESULT / PONG states
+  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL ||
+                 game.state === STATES.RESULT || game.state === STATES.PONG;
   if (inPlay && hudPauseHitbox && hitTest(x, y, hudPauseHitbox)) {
     togglePause();
     sfx.type();
@@ -983,6 +984,7 @@ canvas.addEventListener('click', (e) => {
           togglePause();
         } else if (btn.action === 'quit') {
           game.paused = false;
+          game.pong = null; // clean up pong state if we were in it
           game.state = STATES.TITLE;
         }
         sfx.type();
@@ -1170,6 +1172,7 @@ window.addEventListener('keydown', (e) => {
   // mode, names, difficulty, etc.
   if (game.paused && (e.key === 'q' || e.key === 'Q' || e.key === 'Escape')) {
     game.paused = false;
+    game.pong = null; // clean up pong if we were paused mid-pong
     game.state = STATES.TITLE;
     e.preventDefault();
     return;
@@ -1442,8 +1445,9 @@ function handleCustomSetupKey(e) {
 }
 
 function togglePause() {
-  // Pause is allowed during any active gameplay state (PROBLEM, BALL, RESULT).
-  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT;
+  // Pause is allowed during any active gameplay state (PROBLEM, BALL, RESULT, PONG).
+  const inPlay = game.state === STATES.PROBLEM || game.state === STATES.BALL ||
+                 game.state === STATES.RESULT || game.state === STATES.PONG;
   if (!inPlay) return;
   if (game.paused) {
     const dur = performance.now() - game.pauseStart;
@@ -2086,38 +2090,61 @@ function drawPong() {
     ctx.restore();
   }
 
-  // Scores top-center
-  ctx.save();
-  ctx.font = 'bold 88px "Trebuchet MS"';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  ctx.shadowColor = '#56e2ff';
-  ctx.shadowBlur = 18;
-  ctx.fillStyle = '#56e2ff';
-  ctx.textAlign = 'right';
-  ctx.fillText(String(p.scoreL), W/2 - 60, 30);
-  ctx.shadowColor = '#ff7ad8';
-  ctx.fillStyle = '#ff7ad8';
-  ctx.textAlign = 'left';
-  ctx.fillText(String(p.scoreR), W/2 + 60, 30);
-  ctx.restore();
-
-  // Header
+  // Header at the very top — small, doesn't compete with scores
+  const narrow = W < 720;
   ctx.save();
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.font = 'bold 18px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText(p.standalone ? 'PURE PONG  (easter egg)' : 'PONG INTERLUDE', W/2, 32);
-  ctx.font = 'bold 12px "Trebuchet MS"';
+  ctx.font = 'bold 16px "Trebuchet MS"';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.fillText(p.standalone ? 'PURE PONG  (easter egg)' : 'PONG INTERLUDE', W/2, 14);
+  ctx.font = 'bold 11px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.4)';
   ctx.fillText(
     p.standalone
-      ? 'FIRST TO ' + p.winScore + '   •   ESC to back out'
+      ? 'FIRST TO ' + p.winScore + '   •   tap PAUSE to quit'
       : 'FIRST TO ' + p.winScore + '   •   math match resumes after',
-    W/2, 60
+    W/2, 36
   );
   ctx.restore();
+
+  // Scores BELOW the headers, on the sides. Smaller font on narrow.
+  const scoreFontSize = narrow ? 60 : 80;
+  const scoreY = 56;
+  ctx.save();
+  ctx.font = 'bold ' + scoreFontSize + 'px "Trebuchet MS"';
+  ctx.textBaseline = 'top';
+  ctx.shadowColor = '#56e2ff';
+  ctx.shadowBlur = 16;
+  ctx.fillStyle = '#56e2ff';
+  ctx.textAlign = 'left';
+  ctx.fillText(String(p.scoreL), narrow ? 24 : 60, scoreY);
+  ctx.shadowColor = '#ff7ad8';
+  ctx.fillStyle = '#ff7ad8';
+  ctx.textAlign = 'right';
+  ctx.fillText(String(p.scoreR), W - (narrow ? 24 : 60), scoreY);
+  ctx.restore();
+
+  // Pause button — top-center, between the corner scores. Tap to pause.
+  const pbW = narrow ? 90 : 110;
+  const pbH = 30;
+  const pbX = W/2 - pbW/2;
+  const pbY = 62;
+  const pbHover = hitTest(mouseX, mouseY, { x: pbX, y: pbY, w: pbW, h: pbH });
+  ctx.save();
+  ctx.fillStyle = pbHover ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.10)';
+  ctx.strokeStyle = pbHover ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1.4;
+  roundRect(pbX, pbY, pbW, pbH, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = 'bold 13px "Trebuchet MS"';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = pbHover ? '#fff' : 'rgba(255,255,255,0.85)';
+  ctx.fillText('‖  PAUSE / QUIT', pbX + pbW/2, pbY + pbH/2);
+  ctx.restore();
+  hudPauseHitbox = { x: pbX, y: pbY, w: pbW, h: pbH };
 
   // Player name labels at bottom
   ctx.save();
