@@ -143,10 +143,11 @@ const STATES = {
 // Edit freely — kept as a single string so wrapping is automatic.
 const EASTER_MESSAGE = "Hey Trey! Dad loves you buddy, thanks for helping me build this cool game. Your ideas are awesome! Great football practice Thursday MR MVP!!! I love you and am proud of you. Me and Mom both are so lucky you are our son and the biggest brother to the 3 littles. Love ya buddy brewski ole brodal walker, mr broc-lee. Have fun this weekend!";
 
-// Pong interlude tuning — fires once per match after PONG_TRIGGER correct
-// answers, plays first-to-PONG_WIN_SCORE, then math game resumes.
+// Pong bonus tuning — earned by hitting a STREAK_TRIGGER-long correct streak
+// during a versus match. Plays AFTER the match ends (not as a mid-match
+// interlude), as a celebratory bonus round.
 const PONG = {
-  TRIGGER: 10,
+  STREAK_TRIGGER: 15, // consecutive correct answers needed to unlock bonus pong
   WIN_SCORE: 3,
   PADDLE_W: 18,
   PADDLE_H: 110,
@@ -293,8 +294,9 @@ const game = {
   multiChoice: !!store.multiChoice,
   // Pong interlude state (null when not in PONG state).
   pong: null,
-  // Once-per-match flag so the interlude only fires once.
-  pongFiredThisMatch: false,
+  // Set to true mid-match the first time the player hits the streak trigger.
+  // Played as a bonus AFTER the match ends, not as a mid-match interlude.
+  pongEarned: false,
   stateTimer: 0,
   ball: { x: 0, y: 0, r: 14, color: '#fff', trail: [], travel: null },
   paddleL: { x: 0, y: 0, w: 16, h: 120, color1: '#56e2ff', color2: '#3b82f6', name: store.names.left,  side: 'left',  pulse: 0, targetY: 0, vibe: 0 },
@@ -852,9 +854,15 @@ canvas.addEventListener('click', (e) => {
     return;
   }
 
-  // Game over — tap anywhere returns to title
+  // Game over — tap anywhere advances. If a 15-streak earned bonus Pong,
+  // play that next; otherwise return to title.
   if (game.state === STATES.GAME_OVER) {
-    game.state = STATES.TITLE;
+    if (game.pongEarned) {
+      game.pongEarned = false;
+      startPongStandalone();
+    } else {
+      game.state = STATES.TITLE;
+    }
     sfx.type();
     return;
   }
@@ -1135,8 +1143,18 @@ window.addEventListener('keydown', (e) => {
 
   // === GAME OVER ===
   if (game.state === STATES.GAME_OVER) {
-    if (e.key === ' ' || e.key === 'Enter' || e.key === 'Escape') {
+    if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
+      if (game.pongEarned) {
+        game.pongEarned = false;
+        startPongStandalone();
+      } else {
+        game.state = STATES.TITLE;
+      }
+    } else if (e.key === 'Escape') {
+      // Always bail to title on ESC, even if pong was earned.
+      e.preventDefault();
+      game.pongEarned = false;
       game.state = STATES.TITLE;
     }
     return;
@@ -1365,6 +1383,15 @@ function onCorrect() {
   store.stats.bestStreak = Math.max(store.stats.bestStreak || 0, game.streak[side]);
   saveStore();
 
+  // Bonus Pong unlock: hit a 15-streak in a versus match, get a Pong round
+  // after the match ends as a reward. Doesn't interrupt the math game.
+  const isVersus = game.mode === 'versus2p' || game.mode === 'versus1p';
+  if (isVersus && !game.pongEarned && game.streak[side] >= PONG.STREAK_TRIGGER) {
+    game.pongEarned = true;
+    game.toast = { text: 'PONG BONUS EARNED!  ' + game.streak[side] + ' IN A ROW!', t: 2.4, color: '#7fff90' };
+    if (!store.muted) sfx.spectacle();
+  }
+
   game.lastTimeUsed = cur.timeUsed;
   game.lastTimeLimit = cur.timeLimit;
   sfx.correct();
@@ -1485,7 +1512,7 @@ function startGame() {
   game.winnerSide = null;
   game.recentlyUnlockedOp = null;
   game.recentlyUnlockedRemaining = 0;
-  game.pongFiredThisMatch = false;
+  game.pongEarned = false;
   game.pong = null;
   // recentProblems is intentionally NOT reset — it's a rolling, persistent
   // buffer (see store.recentProblems) so variety holds across matches and
@@ -1506,7 +1533,7 @@ function startPractice() {
   game.winnerSide = null;
   game.recentlyUnlockedOp = null;
   game.recentlyUnlockedRemaining = 0;
-  game.pongFiredThisMatch = false;
+  game.pongEarned = false;
   game.pong = null;
   // recentProblems is intentionally NOT reset — it's a rolling, persistent
   // buffer (see store.recentProblems) so variety holds across matches and
@@ -1527,7 +1554,7 @@ function startCustom() {
   game.winnerSide = null;
   game.recentlyUnlockedOp = null;
   game.recentlyUnlockedRemaining = 0;
-  game.pongFiredThisMatch = false;
+  game.pongEarned = false;
   game.pong = null;
   // recentProblems is intentionally NOT reset — it's a rolling, persistent
   // buffer (see store.recentProblems) so variety holds across matches and
@@ -2245,15 +2272,7 @@ function update(dt) {
     if (k >= 1) {
       sfx.hit();
       const nextSide = game.current.side === 'left' ? 'right' : 'left';
-      // Pong interlude: fire once per match after PONG.TRIGGER correct answers,
-      // versus modes only (skipped in practice/custom).
-      const isVersus = game.mode === 'versus2p' || game.mode === 'versus1p';
-      if (isVersus && !game.pongFiredThisMatch && game.totalCorrect >= PONG.TRIGGER) {
-        game.pongFiredThisMatch = true;
-        startPongInterlude({ nextMathSide: nextSide });
-      } else {
-        startRound(nextSide);
-      }
+      startRound(nextSide);
     }
   } else if (game.state === STATES.PONG) {
     updatePong(dt);
@@ -3599,9 +3618,25 @@ function drawGameOver() {
 
   const t = performance.now() / 1000;
   const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  ctx.font = 'bold 28px "Trebuchet MS"';
-  ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.fillText('PRESS  SPACE  TO  CONTINUE', W/2, pressSpaceY);
+  if (game.pongEarned) {
+    // Bonus Pong unlocked — celebratory prompt instead of the normal continue.
+    ctx.font = 'bold 22px "Trebuchet MS"';
+    ctx.fillStyle = '#7fff90';
+    ctx.shadowColor = '#7fff90';
+    ctx.shadowBlur = 18;
+    ctx.fillText('15-STREAK BONUS!', W/2, pressSpaceY - 10);
+    ctx.shadowBlur = 0;
+    ctx.font = 'bold 26px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(127,255,144,' + blink + ')';
+    ctx.fillText('TAP / SPACE  →  PLAY PONG', W/2, pressSpaceY + 26);
+    ctx.font = '13px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText('(ESC to skip and return to menu)', W/2, pressSpaceY + 56);
+  } else {
+    ctx.font = 'bold 28px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+    ctx.fillText('PRESS  SPACE  TO  CONTINUE', W/2, pressSpaceY);
+  }
   ctx.restore();
 }
 

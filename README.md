@@ -157,9 +157,9 @@ A small decorated easter egg sits in the **bottom-right corner of the title scre
 
 The message and trigger live in the `EASTER_MESSAGE` constant near the top of `index.html`. Edit freely.
 
-## Pong interlude
+## Pong bonus round
 
-Versus matches that pass **10 correct answers** trigger a real Pong mini-game once per match. Players bounce a ball back and forth, first to **3 points** wins. Then the math match resumes from where it left off — pong has no effect on the math score, it's a break.
+Hit a **15-correct streak** during a versus match and you unlock a **bonus Pong round** that plays *after* the math match ends. Doesn't interrupt the game. First to **3 points** wins, then back to title. (The earlier "interlude" version that fired mid-match has been removed — pong only plays after the math match completes.)
 
 Controls:
 - **Left paddle:** `W` (up) / `S` (down)
