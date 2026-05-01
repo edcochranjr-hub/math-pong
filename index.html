@@ -53,7 +53,15 @@ const store = loadStore();
 store.names = store.names || { left: 'PLAYER 1', right: 'PLAYER 2' };
 store.stats = store.stats || { totalSolved: 0, bestStreak: 0, gamesPlayed: 0, weakSpots: {} };
 store.muted = !!store.muted;
-store.multiChoice = !!store.multiChoice;
+// Multiple choice defaults: ON for touch devices (mobile/tablet) on first run
+// since they have no keyboard for typing answers; OFF for desktop. After the
+// user toggles it manually, we respect that choice.
+const isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+if (typeof store.multiChoice === 'undefined') {
+  store.multiChoice = isTouchDevice;
+} else {
+  store.multiChoice = !!store.multiChoice;
+}
 store.customSetup = store.customSetup || {
   ops: { add: true, sub: true, mul: false, div: false, pow: false, alg: false },
   difficulty: 2,
@@ -314,6 +322,27 @@ function updatePaddleNames() {
 
 function namesAreDefault() {
   return store.names.left === 'PLAYER 1' || store.names.right === 'PLAYER 2';
+}
+
+// Centralized "user wants to start the game" action. Called from SPACE keypress
+// AND from the click handler (tap-to-start on touch devices).
+function startGameFlow() {
+  if (game.mode === 'practice') {
+    game.state = STATES.PRACTICE_MENU;
+  } else if (game.mode === 'custom') {
+    game.state = STATES.CUSTOM_SETUP;
+    game.customSetup.customMenuCursor = 0;
+  } else if (game.mode === 'versus2p' && namesAreDefault()) {
+    game.state = STATES.NAME_ENTRY;
+    game.nameEntry = {
+      side: 'left',
+      text: store.names.left === 'PLAYER 1' ? 'TREY' : store.names.left,
+      thenAction: 'startGame',
+      suggested: true,
+    };
+  } else {
+    startGame();
+  }
 }
 
 function loadCustomSetupFromStore() {
@@ -714,6 +743,34 @@ canvas.addEventListener('mouseleave', () => { mouseX = -1; mouseY = -1; canvas.s
 
 // Title-screen clickable buttons. Refreshed every frame in drawTitle.
 let titleButtons = [];
+// Multi-choice answer hitboxes during PROBLEM state (4 cells). Refreshed in drawProblem.
+let mcChoiceHitboxes = [];
+// Title-screen extra hitboxes (chevrons, MC toggle, names line). Refreshed in drawTitle.
+let titleExtras = {};
+
+function hitTest(x, y, box) {
+  return box && x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h;
+}
+
+// Small square chevron button — for cycling MODE / DIFFICULTY. Returns hitbox.
+function drawChevButton(cx, cy, size, char) {
+  const x = cx - size/2, y = cy - size/2;
+  const hovered = hitTest(mouseX, mouseY, { x, y, w: size, h: size });
+  ctx.save();
+  ctx.fillStyle = hovered ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.07)';
+  ctx.strokeStyle = hovered ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.30)';
+  ctx.lineWidth = 1.6;
+  roundRect(x, y, size, size, 9);
+  ctx.fill();
+  ctx.stroke();
+  ctx.font = 'bold ' + Math.round(size * 0.5) + 'px "Trebuchet MS"';
+  ctx.fillStyle = hovered ? '#fff' : 'rgba(255,255,255,0.78)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(char, cx, cy);
+  ctx.restore();
+  return { x, y, w: size, h: size };
+}
 
 // Generic button drawer with hover styling. Returns true if hovered.
 function drawButton(x, y, w, h, label, accent, sublabel) {
@@ -755,35 +812,108 @@ function drawButton(x, y, w, h, label, accent, sublabel) {
   return hovered;
 }
 
-// Click / tap handler — checks easter egg, title buttons, or dismisses HELP/RECORDS.
+// Click / tap handler — supports full mobile play. Handles every state where
+// the user might want to interact via touch.
 canvas.addEventListener('click', (e) => {
-  // Click anywhere dismisses Help/Records
+  ensureAudio();
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  // Help / Records — tap anywhere dismisses
   if (game.state === STATES.HELP || game.state === STATES.RECORDS) {
     game.state = STATES.TITLE;
     sfx.type();
     return;
   }
-  if (game.state !== STATES.TITLE) return;
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  // Easter egg first
-  if (easterEggHitbox) {
-    const eb = easterEggHitbox;
-    if (x >= eb.x && x <= eb.x + eb.w && y >= eb.y && y <= eb.y + eb.h) {
+
+  // Easter message — tap anywhere starts standalone Pong
+  if (game.state === STATES.EASTER_MESSAGE) {
+    startPongStandalone();
+    return;
+  }
+
+  // Game over — tap anywhere returns to title
+  if (game.state === STATES.GAME_OVER) {
+    game.state = STATES.TITLE;
+    sfx.type();
+    return;
+  }
+
+  // Name entry — tap anywhere acts like Enter (advance to next side or start the game)
+  if (game.state === STATES.NAME_ENTRY) {
+    handleNameEntryKey({ key: 'Enter', preventDefault: () => {} });
+    return;
+  }
+
+  // Problem state with multi-choice — tap a choice cell to pick it
+  if (game.state === STATES.PROBLEM && game.current && game.current.problem.choices) {
+    if (game.paused) return;
+    if (game.mode === 'versus1p' && game.current.side === 'right') return; // CPU's turn
+    for (let i = 0; i < mcChoiceHitboxes.length; i++) {
+      if (hitTest(x, y, mcChoiceHitboxes[i])) {
+        const cur = game.current;
+        cur.typed = String(cur.problem.choices[i]);
+        sfx.type();
+        submitAnswer();
+        return;
+      }
+    }
+    return;
+  }
+
+  // Title screen — easter egg → buttons → chevrons → toggle → tap-anywhere-else starts the game
+  if (game.state === STATES.TITLE) {
+    // Easter egg
+    if (hitTest(x, y, easterEggHitbox)) {
       game.state = STATES.EASTER_MESSAGE;
       sfx.type();
       return;
     }
-  }
-  // Then title buttons
-  for (const btn of titleButtons) {
-    if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) {
-      if (btn.action === 'help')    game.state = STATES.HELP;
-      else if (btn.action === 'records') game.state = STATES.RECORDS;
+    // HELP / RECORDS buttons
+    for (const btn of titleButtons) {
+      if (hitTest(x, y, btn)) {
+        if (btn.action === 'help')    game.state = STATES.HELP;
+        else if (btn.action === 'records') game.state = STATES.RECORDS;
+        sfx.type();
+        return;
+      }
+    }
+    // Mode chevrons (▲ / ▼)
+    if (hitTest(x, y, titleExtras.modeUp) || hitTest(x, y, titleExtras.modeDown)) {
+      const modes = ['versus2p', 'versus1p', 'practice', 'custom'];
+      const i = modes.indexOf(game.mode);
+      const dir = hitTest(x, y, titleExtras.modeDown) ? 1 : modes.length - 1;
+      game.mode = modes[(i + dir) % modes.length];
+      updatePaddleNames();
       sfx.type();
       return;
     }
+    // Difficulty chevrons (◀ / ▶)
+    if (hitTest(x, y, titleExtras.diffLeft) || hitTest(x, y, titleExtras.diffRight)) {
+      const dir = hitTest(x, y, titleExtras.diffRight) ? 1 : DIFF_KEYS.length - 1;
+      diffIdx = (diffIdx + dir) % DIFF_KEYS.length;
+      sfx.type();
+      return;
+    }
+    // Multi-choice toggle line
+    if (hitTest(x, y, titleExtras.mcToggle)) {
+      game.multiChoice = !game.multiChoice;
+      store.multiChoice = game.multiChoice;
+      saveStore();
+      sfx.type();
+      return;
+    }
+    // Names line — tap to rename players
+    if (hitTest(x, y, titleExtras.namesArea)) {
+      game.state = STATES.NAME_ENTRY;
+      game.nameEntry = { side: 'left', text: store.names.left };
+      sfx.type();
+      return;
+    }
+    // Anywhere else — start the game (tap-to-start for mobile)
+    startGameFlow();
+    return;
   }
 });
 
@@ -879,25 +1009,7 @@ window.addEventListener('keydown', (e) => {
   if (game.state === STATES.TITLE) {
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      if (game.mode === 'practice') {
-        game.state = STATES.PRACTICE_MENU;
-      } else if (game.mode === 'custom') {
-        game.state = STATES.CUSTOM_SETUP;
-        game.customSetup.customMenuCursor = 0;
-      } else if (game.mode === 'versus2p' && namesAreDefault()) {
-        // Force name entry before a 2-player match so head-to-head + catch
-        // phrases work. Pre-fill TREY / MIMI as suggestions — Enter twice if
-        // those are right, or backspace + type to change.
-        game.state = STATES.NAME_ENTRY;
-        game.nameEntry = {
-          side: 'left',
-          text: store.names.left === 'PLAYER 1' ? 'TREY' : store.names.left,
-          thenAction: 'startGame',
-          suggested: true,
-        };
-      } else {
-        startGame();
-      }
+      startGameFlow();
     } else if (e.key === 'ArrowLeft') {
       diffIdx = (diffIdx + DIFF_KEYS.length - 1) % DIFF_KEYS.length;
       sfx.type();
@@ -2347,11 +2459,14 @@ function drawPauseOverlay() {
 function drawProblem() {
   const cur = game.current;
   const side = cur.side;
-  const halfX = side === 'left' ? W * 0.27 : W * 0.73;
   const accent = side === 'left' ? '#56e2ff' : '#ff7ad8';
+  // On narrow screens the panel takes the full width and centers — too small
+  // otherwise (multi-choice cells become unreadable on phones).
+  const narrow = W < 720;
+  const halfX = narrow ? W / 2 : (side === 'left' ? W * 0.27 : W * 0.73);
 
   ctx.save();
-  const panelW = Math.min(W * 0.42, 560);
+  const panelW = narrow ? Math.min(W - 30, 560) : Math.min(W * 0.42, 560);
   // Multi-choice needs more vertical room for the 2x2 grid.
   const panelH = cur.problem.choices ? 340 : 280;
   const panelX = halfX - panelW/2;
@@ -2385,31 +2500,44 @@ function drawProblem() {
   ctx.shadowBlur = 0;
 
   if (cur.problem.choices) {
-    // Multi-choice: render 4 options in a 2x2 grid.
+    // Multi-choice: render 4 options in a 2x2 grid; track hitboxes for tap.
+    mcChoiceHitboxes = [];
     const cellW = (panelW - 80) / 2;
-    const cellH = 44;
+    const cellH = 50;  // slightly taller for thumb-friendly tap targets
     const gapX = 14;
     const gapY = 12;
     const gridCenterY = panelY + 215;
+    const hovered = !isCPU; // hover effect only when human is solving
     for (let i = 0; i < cur.problem.choices.length; i++) {
       const col = i % 2;
       const row = Math.floor(i / 2);
       const cx = halfX + (col === 0 ? -1 : 1) * (cellW/2 + gapX/2);
       const cy = gridCenterY + (row === 0 ? -1 : 1) * (cellH/2 + gapY/2);
+      const cellTop = cy - cellH/2;
+      const cellLeft = cx - cellW/2;
+
+      // Track hitbox for tap detection
+      mcChoiceHitboxes.push({ x: cellLeft, y: cellTop, w: cellW, h: cellH });
+
+      // Hover-style highlight if mouse is over (desktop nicety)
+      const isHover = hovered && hitTest(mouseX, mouseY, mcChoiceHitboxes[i]);
 
       // Pill background
-      ctx.fillStyle = isCPU ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.10)';
-      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-      ctx.lineWidth = 1;
-      roundRect(cx - cellW/2, cy - cellH/2, cellW, cellH, 8);
+      ctx.fillStyle = isCPU ? 'rgba(255,255,255,0.04)' : (isHover ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.10)');
+      ctx.strokeStyle = isHover ? accent : 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = isHover ? 2 : 1;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = isHover ? 14 : 0;
+      roundRect(cellLeft, cellTop, cellW, cellH, 8);
       ctx.fill();
       ctx.stroke();
+      ctx.shadowBlur = 0;
 
       // Index label (top-left of pill)
       ctx.font = 'bold 13px "Trebuchet MS"';
       ctx.fillStyle = accent;
       ctx.textAlign = 'left';
-      ctx.fillText('[' + (i + 1) + ']', cx - cellW/2 + 12, cy);
+      ctx.fillText('[' + (i + 1) + ']', cellLeft + 12, cy);
 
       // Choice value (centered)
       ctx.font = 'bold 26px "Trebuchet MS"';
@@ -2426,6 +2554,7 @@ function drawProblem() {
       ctx.fillText('CPU is choosing' + '.'.repeat(dotCount), halfX, gridCenterY + cellH + 30);
     }
   } else {
+    mcChoiceHitboxes = [];
     ctx.font = 'bold 56px "Trebuchet MS"';
     ctx.fillStyle = '#ffe066';
     if (isCPU) {
@@ -2514,8 +2643,12 @@ function drawTitle() {
   ctx.textBaseline = 'middle';
   const t = performance.now() / 1000;
 
+  titleExtras = {}; // refresh hitboxes
+  const narrow = W < 720;
   // === TOP: title + subtitle (anchored from top) ===
-  ctx.font = 'bold 92px "Trebuchet MS"';
+  // Title font scales down on narrow / portrait screens so it doesn't overflow.
+  const titleFontSize = Math.min(92, W * 0.16);
+  ctx.font = 'bold ' + titleFontSize + 'px "Trebuchet MS"';
   const grad = ctx.createLinearGradient(0, 40, 0, 130);
   grad.addColorStop(0, '#56e2ff');
   grad.addColorStop(1, '#ff7ad8');
@@ -2534,7 +2667,10 @@ function drawTitle() {
   ctx.fillText('Solve fast — the quicker you answer, the LESS time the other player gets.', W/2, 156);
   ctx.fillText('5 in a row triggers SPECIAL effects.', W/2, 174);
 
-  // === MODE (left column) + DIFFICULTY (right column) side-by-side ===
+  // === MODE + DIFFICULTY ===
+  // On wide screens these sit side-by-side. On narrow (phones / portrait) they
+  // stack vertically so each gets the full width. Each label has tappable
+  // chevron buttons on either side for touch-screen cycling.
   const modeLabels = {
     versus2p: '2 PLAYERS',
     versus1p: '1 PLAYER vs CPU',
@@ -2547,47 +2683,73 @@ function drawTitle() {
     practice: 'Drill one operation. No score, just streak.',
     custom:   'Pick ops + how big the numbers get. Algebra too.'
   };
-  const colMode = W * 0.27;
-  const colDiff = W * 0.73;
-  const headerY = 220;
-  const labelY  = 252;
-  const blurbY  = 280;
-  const blurb2Y = 300;
 
-  // MODE — left column
+  const chevSize = 38;
+  const chevOffset = narrow ? Math.min(W * 0.32, 130) : 110;
+  let colMode, colDiff, modeHeaderY, modeLabelY, modeBlurbY, diffHeaderY, diffLabelY, diffBlurbY, diffBlurb2Y;
+  if (narrow) {
+    colMode = W / 2;
+    colDiff = W / 2;
+    modeHeaderY = 196;
+    modeLabelY  = 226;
+    modeBlurbY  = 252;
+    diffHeaderY = 286;
+    diffLabelY  = 316;
+    diffBlurbY  = 342;
+    diffBlurb2Y = 360;
+  } else {
+    colMode = W * 0.27;
+    colDiff = W * 0.73;
+    modeHeaderY = 220;
+    modeLabelY  = 252;
+    modeBlurbY  = 280;
+    diffHeaderY = 220;
+    diffLabelY  = 252;
+    diffBlurbY  = 280;
+    diffBlurb2Y = 300;
+  }
+
+  // MODE
   ctx.font = 'bold 13px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText('▲ ▼   MODE', colMode, headerY);
+  ctx.textAlign = 'center';
+  ctx.fillText('MODE', colMode, modeHeaderY);
+
+  titleExtras.modeUp   = drawChevButton(colMode - chevOffset, modeLabelY, chevSize, '◀');
+  titleExtras.modeDown = drawChevButton(colMode + chevOffset, modeLabelY, chevSize, '▶');
 
   ctx.font = 'bold 26px "Trebuchet MS"';
   ctx.fillStyle = '#7fff90';
   ctx.shadowColor = '#7fff90';
   ctx.shadowBlur = 12;
-  ctx.fillText(modeLabels[game.mode], colMode, labelY);
+  ctx.fillText(modeLabels[game.mode], colMode, modeLabelY);
   ctx.shadowBlur = 0;
 
   ctx.font = '11px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText(modeBlurbs[game.mode], colMode, blurbY);
+  ctx.fillText(modeBlurbs[game.mode], colMode, modeBlurbY);
 
-  // DIFFICULTY — right column
+  // DIFFICULTY
   const diff = curDiff();
   ctx.font = 'bold 13px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText('◀ ▶   DIFFICULTY', colDiff, headerY);
+  ctx.fillText('DIFFICULTY', colDiff, diffHeaderY);
+
+  titleExtras.diffLeft  = drawChevButton(colDiff - chevOffset, diffLabelY, chevSize, '◀');
+  titleExtras.diffRight = drawChevButton(colDiff + chevOffset, diffLabelY, chevSize, '▶');
 
   ctx.font = 'bold 22px "Trebuchet MS"';
   const dColor = ['#7fff90', '#ffe066', '#ff7ad8'][diffIdx];
   ctx.fillStyle = dColor;
   ctx.shadowColor = dColor;
   ctx.shadowBlur = 10;
-  ctx.fillText(diff.name, colDiff, labelY);
+  ctx.fillText(diff.name, colDiff, diffLabelY);
   ctx.shadowBlur = 0;
 
   ctx.font = '11px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
-  ctx.fillText(diff.blurb, colDiff, blurbY);
-  ctx.fillText('Min ' + diff.minTime.toFixed(1) + 's   •   Max ' + diff.maxTime.toFixed(1) + 's', colDiff, blurb2Y);
+  ctx.fillText(diff.blurb, colDiff, diffBlurbY);
+  if (!narrow) ctx.fillText('Min ' + diff.minTime.toFixed(1) + 's   •   Max ' + diff.maxTime.toFixed(1) + 's', colDiff, diffBlurb2Y);
 
   // === BOTTOM-ANCHORED STACK (built upward from H so it never collides) ===
   let y = H - 18;
@@ -2602,32 +2764,39 @@ function drawTitle() {
     y -= 22;
   }
 
-  // Two big side-by-side buttons: HELP HELP ME RHONDA  |  MY RECORDS
-  const btnW = 250;
-  const btnH = 54;
-  const btnGap = 24;
+  // Two side-by-side buttons. Sizes adapt to screen width.
+  const btnGap = 18;
+  const btnH = narrow ? 48 : 54;
+  const btnW = narrow ? Math.min(180, (W - 60 - btnGap) / 2) : 250;
   const btnTotalW = btnW * 2 + btnGap;
   const btnX0 = W/2 - btnTotalW/2;
   const btnY = y - btnH - 4;
 
-  drawButton(btnX0, btnY, btnW, btnH, 'HELP HELP ME RHONDA', '#56e2ff', 'controls & how to play');
+  const helpLabel = narrow ? 'HELP' : 'HELP HELP ME RHONDA';
+  const helpSub = narrow ? null : 'controls & how to play';
+  drawButton(btnX0, btnY, btnW, btnH, helpLabel, '#56e2ff', helpSub);
   titleButtons.push({ x: btnX0, y: btnY, w: btnW, h: btnH, action: 'help' });
 
   const s = store.stats;
-  const recordsSub = (s.totalSolved||0) + ' solved · best streak ' + (s.bestStreak||0);
-  drawButton(btnX0 + btnW + btnGap, btnY, btnW, btnH, 'MY RECORDS', '#ffe066', recordsSub);
+  const recordsLabel = narrow ? 'RECORDS' : 'MY RECORDS';
+  const recordsSub = narrow ? null : ((s.totalSolved||0) + ' solved · best streak ' + (s.bestStreak||0));
+  drawButton(btnX0 + btnW + btnGap, btnY, btnW, btnH, recordsLabel, '#ffe066', recordsSub);
   titleButtons.push({ x: btnX0 + btnW + btnGap, y: btnY, w: btnW, h: btnH, action: 'records' });
 
   y = btnY - 18;
 
   // INPUT mode indicator (multiple choice toggle) — plain language for kids.
+  // Whole line is tappable on touch.
   ctx.font = 'bold 15px "Trebuchet MS"';
   ctx.fillStyle = game.multiChoice ? '#7fff90' : '#fff';
   ctx.textAlign = 'center';
   const inputDesc = game.multiChoice
-    ? 'Multiple Choice   •   press C to Type instead'
-    : 'Type the answer   •   press C for Multiple Choice';
+    ? 'Multiple Choice   •   tap or press C to Type instead'
+    : 'Type the answer   •   tap or press C for Multiple Choice';
   ctx.fillText(inputDesc, W/2, y);
+  // Register tappable hitbox for the toggle line
+  const mcLineW = ctx.measureText(inputDesc).width;
+  titleExtras.mcToggle = { x: W/2 - mcLineW/2 - 12, y: y - 14, w: mcLineW + 24, h: 28 };
   y -= 36;
 
   // SPACE to start / set up (large, blinking)
@@ -2647,7 +2816,7 @@ function drawTitle() {
   ctx.fillText('press [N] to rename', W/2, y);
   y -= 28;
 
-  // NAMES (large, colored per side)
+  // NAMES (large, colored per side) — whole row is tappable to enter rename.
   ctx.font = 'bold 22px "Trebuchet MS"';
   const lname = store.names.left;
   const rname = game.mode === 'versus1p' ? 'CPU' : store.names.right;
@@ -2657,6 +2826,7 @@ function drawTitle() {
   ctx.fillText('vs', W/2, y);
   ctx.fillStyle = '#ff7ad8';
   ctx.fillText(rname, W/2 + 110, y);
+  titleExtras.namesArea = { x: W/2 - 220, y: y - 18, w: 440, h: 36 };
 
   // Head-to-head record above names (if any matches recorded for this pair)
   const h2h = getH2H(lname, rname);
@@ -2711,89 +2881,114 @@ function drawHelp() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
+  const narrow = W < 720;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
   // Title
-  ctx.font = 'bold 56px "Trebuchet MS"';
+  const titleFont = narrow ? Math.min(40, W * 0.085) : 56;
+  ctx.font = 'bold ' + titleFont + 'px "Trebuchet MS"';
   ctx.fillStyle = '#56e2ff';
   ctx.shadowColor = '#56e2ff';
-  ctx.shadowBlur = 24;
-  ctx.fillText('HELP HELP ME RHONDA', W/2, 70);
+  ctx.shadowBlur = 22;
+  ctx.fillText('HELP HELP ME RHONDA', W/2, narrow ? 50 : 70);
   ctx.shadowBlur = 0;
 
-  ctx.font = 'italic 14px "Trebuchet MS"';
+  ctx.font = 'italic 13px "Trebuchet MS"';
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
-  ctx.fillText('Controls & how to play', W/2, 105);
+  ctx.fillText('Controls & how to play', W/2, narrow ? 80 : 105);
 
-  // Two-column layout
-  const colY = 150;
-  const lineH = 20;
-  const sectionGap = 14;
-  const col1X = W * 0.28;
-  const col2X = W * 0.72;
   ctx.textAlign = 'left';
+  const sections = [
+    { title: 'HOW TO ANSWER', lines: [
+      'TAP a multi-choice option (1–4)',
+      'OR type your answer with NUMBERS',
+      '(auto-submits when correct)',
+      'ENTER — force-submit',
+      'BACKSPACE — erase a digit',
+      '−  key — negative answers',
+    ]},
+    { title: 'TITLE SCREEN', lines: [
+      'TAP the chevron buttons to change',
+      '   mode or difficulty',
+      'TAP names to rename players',
+      'TAP "Multiple Choice" to toggle',
+      'TAP anywhere else to start',
+      '(keyboard: ▲▼/◀▶/N/C/SPACE)',
+    ]},
+    { title: 'DURING A GAME', lines: [
+      'P — pause / resume',
+      'Q (paused) — quit to main menu',
+      'M — mute / unmute',
+      'ESC (practice/custom) — quit',
+    ]},
+    { title: 'PONG INTERLUDE', lines: [
+      'After 10 correct answers in a',
+      'versus match — first to 3.',
+      'W/S — left paddle up/down',
+      '↑/↓ — right paddle up/down',
+      'TOUCH your half on tablet/phone',
+    ]},
+    { title: 'GAME MODES', lines: [
+      '2 PLAYERS — same keyboard / device',
+      '1 vs CPU — solo vs the computer',
+      'PRACTICE — drill one operation',
+      'CUSTOM — pick ops + difficulty',
+    ]},
+  ];
 
-  function drawSection(x, startY, title, lines) {
-    ctx.font = 'bold 18px "Trebuchet MS"';
-    ctx.fillStyle = '#7fff90';
-    ctx.fillText(title, x - 180, startY);
-    ctx.font = '14px "Trebuchet MS"';
-    ctx.fillStyle = '#fff';
-    for (let i = 0; i < lines.length; i++) {
-      ctx.fillText(lines[i], x - 180, startY + 24 + i * lineH);
+  if (narrow) {
+    // Single-column, fit everything from ~y=110 down
+    const startY = 110;
+    const lineH = 18;
+    const sectionGap = 10;
+    const colX = 24;
+    let y = startY;
+    for (const sec of sections) {
+      ctx.font = 'bold 16px "Trebuchet MS"';
+      ctx.fillStyle = '#7fff90';
+      ctx.fillText(sec.title, colX, y);
+      ctx.font = '13px "Trebuchet MS"';
+      ctx.fillStyle = '#fff';
+      for (let i = 0; i < sec.lines.length; i++) {
+        ctx.fillText(sec.lines[i], colX, y + 22 + i * lineH);
+      }
+      y += 22 + sec.lines.length * lineH + sectionGap;
     }
-    return startY + 24 + lines.length * lineH + sectionGap;
+  } else {
+    // Two-column layout for wide screens
+    const startY = 150;
+    const lineH = 20;
+    const sectionGap = 14;
+    const col1X = W * 0.28;
+    const col2X = W * 0.72;
+    function drawSection(x, sy, sec) {
+      ctx.font = 'bold 18px "Trebuchet MS"';
+      ctx.fillStyle = '#7fff90';
+      ctx.fillText(sec.title, x - 180, sy);
+      ctx.font = '14px "Trebuchet MS"';
+      ctx.fillStyle = '#fff';
+      for (let i = 0; i < sec.lines.length; i++) {
+        ctx.fillText(sec.lines[i], x - 180, sy + 24 + i * lineH);
+      }
+      return sy + 24 + sec.lines.length * lineH + sectionGap;
+    }
+    let y1 = startY;
+    y1 = drawSection(col1X, y1, sections[0]);
+    y1 = drawSection(col1X, y1, sections[1]);
+    let y2 = startY;
+    y2 = drawSection(col2X, y2, sections[2]);
+    y2 = drawSection(col2X, y2, sections[3]);
+    y2 = drawSection(col2X, y2, sections[4]);
   }
-
-  let y1 = colY;
-  y1 = drawSection(col1X, y1, 'HOW TO ANSWER', [
-    'NUMBERS 0-9 — type your answer',
-    '(auto-submits when correct)',
-    'ENTER — force-submit',
-    'BACKSPACE — erase a digit',
-    '−  key — for negative answers',
-    'In Multiple Choice mode:',
-    '   1, 2, 3, 4 — pick a choice',
-  ]);
-  y1 = drawSection(col1X, y1, 'TITLE SCREEN', [
-    '▲ ▼ — change game mode',
-    '◀ ▶ — change difficulty',
-    'N — rename players',
-    'C — toggle Multiple Choice',
-    'SPACE — start the game',
-  ]);
-
-  let y2 = colY;
-  y2 = drawSection(col2X, y2, 'DURING A GAME', [
-    'P — pause / resume',
-    'Q — (paused) quit to main menu',
-    'M — mute / unmute (anywhere)',
-    'ESC — practice / custom modes:',
-    '   quit back to title',
-  ]);
-  y2 = drawSection(col2X, y2, 'PONG INTERLUDE', [
-    'After 10 correct answers in a',
-    'versus match — first to 3.',
-    '',
-    'W / S — left paddle up/down',
-    '↑ / ↓ — right paddle up/down',
-    'Touch your half on tablet/phone',
-  ]);
-  y2 = drawSection(col2X, y2, 'GAME MODES', [
-    '2 PLAYERS — same keyboard',
-    '1 vs CPU — solo vs computer',
-    'PRACTICE — drill one op',
-    'CUSTOM — pick ops + difficulty',
-  ]);
 
   // Footer
   const t = performance.now() / 1000;
   const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.font = 'bold ' + (narrow ? 14 : 18) + 'px "Trebuchet MS"';
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.fillText('Click anywhere or press ESC / SPACE to go back', W/2, H - 36);
+  ctx.fillText(narrow ? 'Tap anywhere to go back' : 'Click anywhere or press ESC / SPACE to go back', W/2, H - (narrow ? 22 : 36));
 
   ctx.restore();
 }
@@ -2807,80 +3002,89 @@ function drawRecords() {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
+  const narrow = W < 720;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
-  // Title
-  ctx.font = 'bold 64px "Trebuchet MS"';
+  // Title — scales for phone screens
+  const titleFont = narrow ? Math.min(46, W * 0.10) : 64;
+  ctx.font = 'bold ' + titleFont + 'px "Trebuchet MS"';
   ctx.fillStyle = '#ffe066';
   ctx.shadowColor = '#ffe066';
-  ctx.shadowBlur = 28;
-  ctx.fillText('MY RECORDS', W/2, 80);
+  ctx.shadowBlur = 22;
+  ctx.fillText('MY RECORDS', W/2, narrow ? 50 : 80);
   ctx.shadowBlur = 0;
+
+  // Layout offsets — tighter on phones
+  const lifeHdrY = narrow ? 100 : 150;
+  const lifeBigY = narrow ? 138 : 195;
+  const lifeBSY  = narrow ? 168 : 232;
+  const lifeMPY  = narrow ? 192 : 260;
+  const h2hHdrY  = narrow ? 230 : 320;
+  const h2hStartY = narrow ? 262 : 360;
+  const h2hLineH = narrow ? 26 : 30;
 
   // LIFETIME block
   const s = store.stats;
-  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.font = 'bold ' + (narrow ? 18 : 22) + 'px "Trebuchet MS"';
   ctx.fillStyle = '#7fff90';
-  ctx.fillText('LIFETIME', W/2, 150);
+  ctx.fillText('LIFETIME', W/2, lifeHdrY);
 
-  ctx.font = 'bold 30px "Trebuchet MS"';
+  ctx.font = 'bold ' + (narrow ? 24 : 30) + 'px "Trebuchet MS"';
   ctx.fillStyle = '#fff';
-  ctx.fillText((s.totalSolved||0) + ' problems solved', W/2, 195);
+  ctx.fillText((s.totalSolved||0) + ' problems solved', W/2, lifeBigY);
 
-  ctx.font = '20px "Trebuchet MS"';
+  ctx.font = (narrow ? 16 : 20) + 'px "Trebuchet MS"';
   ctx.fillStyle = '#fff';
-  ctx.fillText('Best streak ever:  ' + (s.bestStreak||0), W/2, 232);
-  ctx.fillText('Matches played:  ' + (s.gamesPlayed||0), W/2, 260);
+  ctx.fillText('Best streak ever:  ' + (s.bestStreak||0), W/2, lifeBSY);
+  ctx.fillText('Matches played:  ' + (s.gamesPlayed||0), W/2, lifeMPY);
 
   // HEAD-TO-HEAD block
   const pairs = getAllH2HRecords();
-  ctx.font = 'bold 22px "Trebuchet MS"';
+  ctx.font = 'bold ' + (narrow ? 18 : 22) + 'px "Trebuchet MS"';
   ctx.fillStyle = '#ff7ad8';
-  ctx.fillText('HEAD TO HEAD', W/2, 320);
+  ctx.fillText('HEAD TO HEAD', W/2, h2hHdrY);
 
   if (pairs.length === 0) {
-    ctx.font = 'italic 16px "Trebuchet MS"';
+    ctx.font = 'italic ' + (narrow ? 13 : 16) + 'px "Trebuchet MS"';
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.fillText('No matches yet.  Rename PLAYER 1 / PLAYER 2 (press N on title)', W/2, 355);
-    ctx.fillText('and play a versus match — your record shows up here.', W/2, 378);
+    ctx.fillText(narrow ? 'No matches yet.' : 'No matches yet.  Rename PLAYER 1 / PLAYER 2 (press N on title)', W/2, h2hHdrY + 32);
+    ctx.fillText(narrow ? 'Play a versus match to fill this in.' : 'and play a versus match — your record shows up here.', W/2, h2hHdrY + 56);
   } else {
-    // Sort by total games descending
     pairs.sort((p1, p2) => (p2.aWins + p2.bWins) - (p1.aWins + p1.bWins));
-    const startY = 360;
-    const lineH = 30;
-    ctx.font = 'bold 20px "Trebuchet MS"';
-    for (let i = 0; i < Math.min(pairs.length, 8); i++) {
+    ctx.font = 'bold ' + (narrow ? 17 : 20) + 'px "Trebuchet MS"';
+    const colOffset = narrow ? 50 : 60;
+    const maxRows = narrow ? Math.min(pairs.length, 6) : Math.min(pairs.length, 8);
+    for (let i = 0; i < maxRows; i++) {
       const p = pairs[i];
-      // Highlight the leader's name
       const aLead = p.aWins > p.bWins;
       const bLead = p.bWins > p.aWins;
-      const tx = W/2;
+      const yy = h2hStartY + i * h2hLineH;
       ctx.textAlign = 'right';
       ctx.fillStyle = aLead ? '#7fff90' : '#fff';
-      ctx.fillText(p.a, tx - 60, startY + i * lineH);
+      ctx.fillText(p.a, W/2 - colOffset, yy);
       ctx.textAlign = 'center';
       ctx.fillStyle = '#ffe066';
-      ctx.fillText(p.aWins + '  —  ' + p.bWins, tx, startY + i * lineH);
+      ctx.fillText(p.aWins + '  —  ' + p.bWins, W/2, yy);
       ctx.textAlign = 'left';
       ctx.fillStyle = bLead ? '#7fff90' : '#fff';
-      ctx.fillText(p.b, tx + 60, startY + i * lineH);
+      ctx.fillText(p.b, W/2 + colOffset, yy);
     }
-    if (pairs.length > 8) {
-      ctx.font = 'italic 14px "Trebuchet MS"';
+    if (pairs.length > maxRows) {
+      ctx.font = 'italic 13px "Trebuchet MS"';
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(255,255,255,0.5)';
-      ctx.fillText('+ ' + (pairs.length - 8) + ' more pairs', W/2, startY + 8 * lineH + 12);
+      ctx.fillText('+ ' + (pairs.length - maxRows) + ' more pairs', W/2, h2hStartY + maxRows * h2hLineH + 12);
     }
   }
 
   // Footer
   const t = performance.now() / 1000;
   const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  ctx.font = 'bold 18px "Trebuchet MS"';
+  ctx.font = 'bold ' + (narrow ? 14 : 18) + 'px "Trebuchet MS"';
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-  ctx.fillText('Click anywhere or press ESC / SPACE to go back', W/2, H - 36);
+  ctx.fillText(narrow ? 'Tap anywhere to go back' : 'Click anywhere or press ESC / SPACE to go back', W/2, H - (narrow ? 22 : 36));
 
   ctx.restore();
 }
