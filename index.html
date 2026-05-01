@@ -164,18 +164,18 @@ const WIN_SCORE = 7;
 
 const DIFFICULTIES = {
   KIDS: {
-    name: 'KIDS  (ages 6-9)',
-    blurb: 'Big, gentle ramp. Add/sub/times tables only.',
-    minTime: 3.5,
-    maxTime: 6.5,
-    maxDrop: 0.5,
-    maxTier: 4,
-    tierMult: 2.2,
-    cpu: { thinkAvg: 4.0, thinkStd: 1.4, accuracy: 0.78 },
+    name: 'KIDS  (ages 5-8)',
+    blurb: 'Just simple single-digit + and −. Nothing harder.',
+    minTime: 4.0,
+    maxTime: 7.0,
+    maxDrop: 0.35,
+    maxTier: 2,    // only add + sub ever unlock; mul/div/pow never appear
+    tierMult: 2.5,
+    cpu: { thinkAvg: 4.8, thinkStd: 1.5, accuracy: 0.72 },
   },
   FAMILY: {
-    name: 'FAMILY  (ages 9-13)',
-    blurb: 'Default — covers add through powers.',
+    name: 'FAMILY  (ages 9-12)',
+    blurb: 'Add ≤ 250, sub ≤ 99, mul times tables + round multipliers.',
     minTime: 2.5,
     maxTime: 5.5,
     maxDrop: 0.8,
@@ -184,8 +184,8 @@ const DIFFICULTIES = {
     cpu: { thinkAvg: 2.6, thinkStd: 1.0, accuracy: 0.86 },
   },
   GENIUS: {
-    name: 'GENIUS  (13+)',
-    blurb: 'Negatives, faster ramp, full pressure.',
+    name: 'GENIUS  (13-adult)',
+    blurb: 'Full variety — negatives, big numbers, the works.',
     minTime: 2.0,
     maxTime: 5.5,
     maxDrop: 1.2,
@@ -488,32 +488,88 @@ function fmt(n, isFirst) {
 // KIDS mode (mult 2.2) ramps slower; GENIUS (mult 1.0) ramps fastest.
 function magnitudeFor(op, complexity) {
   const c = complexity;
-  // Smooth, fine-grained ramp. Each band grows about 1.5x the previous max so
-  // problems creep up through 30s, 40s, 50s, 60s, 70s before hitting high
-  // doubles and triples — no cliff jumps. Same gradual idea applies across
-  // every op (add / sub / mul / div / pow).
+  const diffKey = DIFF_KEYS[diffIdx]; // 'KIDS' | 'FAMILY' | 'GENIUS'
+
+  // === KIDS (5-8) — strictly single-digit add/sub. Nothing else fires
+  // anyway because maxTier=2, but defensive single-digit fallback for any op.
+  if (diffKey === 'KIDS') {
+    return { min: 1, max: 9 };
+  }
+
+  // === FAMILY (9-12) — capped per op:
+  //   add  ≤ 250 (low triples)
+  //   sub  ≤ 99
+  //   mul  product ≤ ~99 normally; round multipliers handled in genProblem
+  //   div  small division facts only
+  //   pow  same exp rule as GENIUS but small bases
+  if (diffKey === 'FAMILY') {
+    if (op === 'add') {
+      if (c <= 2.5)  return { min: 1,  max: 9 };
+      if (c <= 4.5)  return { min: 2,  max: 14 };
+      if (c <= 6.5)  return { min: 4,  max: 22 };
+      if (c <= 8.5)  return { min: 8,  max: 35 };
+      if (c <= 10.5) return { min: 12, max: 50 };
+      if (c <= 12.5) return { min: 18, max: 70 };
+      if (c <= 14.5) return { min: 30, max: 99 };
+      if (c <= 17)   return { min: 45, max: 150 };
+      return              { min: 60, max: 250 }; // hard cap at low triples
+    }
+    if (op === 'sub') {
+      if (c <= 2.5)  return { min: 1,  max: 9 };
+      if (c <= 4.5)  return { min: 2,  max: 14 };
+      if (c <= 6.5)  return { min: 4,  max: 22 };
+      if (c <= 8.5)  return { min: 8,  max: 35 };
+      if (c <= 10.5) return { min: 12, max: 50 };
+      if (c <= 12.5) return { min: 18, max: 70 };
+      return              { min: 25, max: 99 }; // hard cap at 99
+    }
+    if (op === 'mul') {
+      // Plain times tables; round multipliers (5/10/25/50/100) injected in genProblem.
+      if (c <= 4)  return { aMin: 2, aMax: 5, bMin: 2, bMax: 4 };
+      if (c <= 6)  return { aMin: 2, aMax: 6, bMin: 2, bMax: 5 };
+      if (c <= 8)  return { aMin: 2, aMax: 7, bMin: 2, bMax: 6 };
+      if (c <= 10) return { aMin: 2, aMax: 8, bMin: 2, bMax: 7 };
+      return            { aMin: 2, aMax: 9, bMin: 2, bMax: 9 }; // 9×9 = 81
+    }
+    if (op === 'div') {
+      if (c <= 5)  return { qMin: 2, qMax: 5, dMin: 2, dMax: 4 };
+      if (c <= 7)  return { qMin: 2, qMax: 6, dMin: 2, dMax: 5 };
+      if (c <= 9)  return { qMin: 2, qMax: 7, dMin: 2, dMax: 6 };
+      return            { qMin: 2, qMax: 9, dMin: 2, dMax: 9 };
+    }
+    if (op === 'pow') {
+      // Single-digit bases. Exponent rule applied in genProblem:
+      //   base < 5 → exp up to 4   (max 4^4 = 256)
+      //   base ≥ 5 → exp up to 3   (max 9^3 = 729)
+      if (c <= 28) return { baseMin: 2, baseMax: 4 };
+      if (c <= 32) return { baseMin: 2, baseMax: 6 };
+      return            { baseMin: 2, baseMax: 9 };
+    }
+  }
+
+  // === GENIUS (13+) — full smooth ramp ===
   if (op === 'add' || op === 'sub') {
-    if (c <= 2.5)  return { min: 1,    max: 9 };      // single digit
-    if (c <= 4.5)  return { min: 2,    max: 14 };     // single + low teens
-    if (c <= 6.5)  return { min: 4,    max: 22 };     // teens to low 20s
-    if (c <= 8.5)  return { min: 8,    max: 35 };     // 20s to low 30s
-    if (c <= 10.5) return { min: 12,   max: 50 };     // 30s to 40s
-    if (c <= 12.5) return { min: 18,   max: 70 };     // 40s to 60s
-    if (c <= 14.5) return { min: 30,   max: 99 };     // 50s to 90s
-    if (c <= 17)   return { min: 45,   max: 150 };    // high doubles to low triples
-    if (c <= 20)   return { min: 75,   max: 300 };    // mid triples
-    if (c <= 24)   return { min: 150,  max: 600 };    // high triples
-    if (c <= 28)   return { min: 300,  max: 1500 };   // 4-digit
+    if (c <= 2.5)  return { min: 1,    max: 9 };
+    if (c <= 4.5)  return { min: 2,    max: 14 };
+    if (c <= 6.5)  return { min: 4,    max: 22 };
+    if (c <= 8.5)  return { min: 8,    max: 35 };
+    if (c <= 10.5) return { min: 12,   max: 50 };
+    if (c <= 12.5) return { min: 18,   max: 70 };
+    if (c <= 14.5) return { min: 30,   max: 99 };
+    if (c <= 17)   return { min: 45,   max: 150 };
+    if (c <= 20)   return { min: 75,   max: 300 };
+    if (c <= 24)   return { min: 150,  max: 600 };
+    if (c <= 28)   return { min: 300,  max: 1500 };
     return              { min: 800,  max: 9999 };
   }
   if (op === 'mul') {
-    if (c <= 4)    return { aMin: 2, aMax: 5,  bMin: 2, bMax: 4  };   // baby times tables
+    if (c <= 4)    return { aMin: 2, aMax: 5,  bMin: 2, bMax: 4  };
     if (c <= 6)    return { aMin: 2, aMax: 6,  bMin: 2, bMax: 5  };
     if (c <= 8)    return { aMin: 2, aMax: 7,  bMin: 2, bMax: 6  };
     if (c <= 10)   return { aMin: 2, aMax: 8,  bMin: 2, bMax: 7  };
-    if (c <= 12)   return { aMin: 2, aMax: 9,  bMin: 2, bMax: 9  };   // full 9x9
+    if (c <= 12)   return { aMin: 2, aMax: 9,  bMin: 2, bMax: 9  };
     if (c <= 14)   return { aMin: 2, aMax: 11, bMin: 2, bMax: 9  };
-    if (c <= 16)   return { aMin: 2, aMax: 12, bMin: 2, bMax: 12 };   // 12x12
+    if (c <= 16)   return { aMin: 2, aMax: 12, bMin: 2, bMax: 12 };
     if (c <= 19)   return { aMin: 3, aMax: 15, bMin: 2, bMax: 12 };
     if (c <= 22)   return { aMin: 6, aMax: 25, bMin: 2, bMax: 9  };
     if (c <= 26)   return { aMin: 10, aMax: 50, bMin: 2, bMax: 9  };
@@ -531,11 +587,13 @@ function magnitudeFor(op, complexity) {
     return              { qMin: 5, qMax: 50, dMin: 2, dMax: 12 };
   }
   if (op === 'pow') {
-    if (c <= 12)   return { baseMin: 2, baseMax: 4, exps: [2, 2, 3] };       // 2^2 to 4^3
-    if (c <= 16)   return { baseMin: 2, baseMax: 5, exps: [2, 2, 3] };       // up to 5^3
-    if (c <= 20)   return { baseMin: 2, baseMax: 6, exps: [2, 2, 3, 3] };
-    if (c <= 26)   return { baseMin: 2, baseMax: 7, exps: [2, 3, 3, 4] };
-    return              { baseMin: 2, baseMax: 9, exps: [2, 3, 3, 4] };
+    // Single-digit bases. Exponent rule applied in genProblem:
+    //   base < 5 → exp up to 4   (max 4^4 = 256)
+    //   base ≥ 5 → exp up to 3   (max 9^3 = 729)
+    if (c <= 18) return { baseMin: 2, baseMax: 4 };
+    if (c <= 22) return { baseMin: 2, baseMax: 5 };
+    if (c <= 27) return { baseMin: 2, baseMax: 7 };
+    return            { baseMin: 2, baseMax: 9 };
   }
   return { min: 1, max: 9 };
 }
@@ -613,6 +671,18 @@ function genProblem(easy, opOverride) {
       break;
     }
     case 'mul': {
+      // FAMILY mode: 35% chance of using a "round" multiplier (5 / 10 / 25 /
+      // 50 / 100). These mentally simple but produce larger products
+      // (e.g. 25×8=200, 100×7=700) while normal mul stays at single×single.
+      const diffKey = DIFF_KEYS[diffIdx];
+      if (diffKey === 'FAMILY' && Math.random() < 0.35) {
+        a = pick([5, 10, 25, 50, 100]);
+        b = rand(2, 9);
+        if (Math.random() < 0.5) [a, b] = [b, a];
+        text = fmt(a, true) + ' × ' + fmt(b, false);
+        answer = a * b;
+        break;
+      }
       a = rand(m.aMin, m.aMax);
       b = rand(m.bMin, m.bMax);
       if (tier >= 9 && Math.random() < 0.3) a = -a;
@@ -629,8 +699,11 @@ function genProblem(easy, opOverride) {
       break;
     }
     case 'pow': {
+      // Bases stay single-digit. Exponent rule:
+      //   base < 5 → exp up to 4 (caps: 2^4=16, 3^4=81, 4^4=256)
+      //   base ≥ 5 → exp up to 3 (caps: 5^3=125 ... 9^3=729)
       a = rand(m.baseMin, m.baseMax);
-      b = pick(m.exps);
+      b = (a < 5) ? pick([2, 2, 3, 3, 4]) : pick([2, 2, 3]);
       answer = Math.pow(a, b);
       text = `${a}^${b}`;
       break;
@@ -692,9 +765,9 @@ function genCustomProblem() {
       break;
     }
     case 'pow': {
+      // Same exp rule as versus mode: base < 5 → exp up to 4, base ≥ 5 → up to 3.
       a = rand(2, powBaseMax);
-      const exps = diff <= 2 ? [2,2,3] : diff <= 4 ? [2,2,3,3,4] : [2,3,3,4,5];
-      b = pick(exps);
+      b = (a < 5) ? pick([2, 2, 3, 3, 4]) : pick([2, 2, 3]);
       answer = Math.pow(a, b);
       text = `${a}^${b}`;
       break;
