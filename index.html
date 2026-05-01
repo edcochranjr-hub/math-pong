@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Math Pong</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -328,6 +331,38 @@ function updatePaddleNames() {
 
 function namesAreDefault() {
   return store.names.left === 'PLAYER 1' || store.names.right === 'PLAYER 2';
+}
+
+// Fullscreen helpers — request/exit via the Fullscreen API. Browser usually
+// hides the URL bar / status bar in fullscreen, giving the game the whole
+// screen. Must be triggered from a user gesture (click/tap), so we call this
+// from the click handler. Silently does nothing on browsers that don't
+// support it (e.g. iOS Safari pre-16 doesn't expose document fullscreen).
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement);
+}
+function requestFullscreenSilent() {
+  const el = document.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen;
+  if (req) {
+    try {
+      const p = req.call(el);
+      if (p && p.catch) p.catch(() => {}); // suppress rejection
+    } catch (_) { /* noop */ }
+  }
+}
+function exitFullscreenSilent() {
+  const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen;
+  if (exit) {
+    try {
+      const p = exit.call(document);
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) { /* noop */ }
+  }
+}
+function toggleFullscreen() {
+  if (isFullscreen()) exitFullscreenSilent();
+  else requestFullscreenSilent();
 }
 
 // True when running on a touch device that's currently in portrait orientation.
@@ -1106,12 +1141,18 @@ canvas.addEventListener('click', (e) => {
       sfx.type();
       return;
     }
-    // Title buttons (HELP, RECORDS, START)
+    // Title buttons (HELP, RECORDS, START, FULLSCREEN)
     for (const btn of titleButtons) {
       if (hitTest(x, y, btn)) {
         if (btn.action === 'help')         game.state = STATES.HELP;
         else if (btn.action === 'records') game.state = STATES.RECORDS;
-        else if (btn.action === 'start')   startGameFlow();
+        else if (btn.action === 'fullscreen') toggleFullscreen();
+        else if (btn.action === 'start') {
+          // Auto-request fullscreen on touch devices when starting a game,
+          // so the browser URL bar tucks away. Silently no-ops if denied.
+          if (isTouchDevice && !isFullscreen()) requestFullscreenSilent();
+          startGameFlow();
+        }
         sfx.type();
         return;
       }
@@ -3303,6 +3344,32 @@ function drawTitle() {
   const mcLineW = ctx.measureText(inputDesc).width;
   titleExtras.mcToggle = { x: W/2 - mcLineW/2 - 12, y: y - 14, w: mcLineW + 24, h: 28 };
   y -= 36;
+
+  // === FULLSCREEN button (touch only — desktop already has its window) ===
+  // Pulled in above the START button so it's the natural first thing to tap
+  // when the player wants to lose the browser URL bar.
+  if (isTouchDevice) {
+    const fsW = Math.min(220, W - 60);
+    const fsH = 32;
+    const fsX = W/2 - fsW/2;
+    const fsY = y - fsH;
+    const fsHover = hitTest(mouseX, mouseY, { x: fsX, y: fsY, w: fsW, h: fsH });
+    ctx.save();
+    ctx.fillStyle = fsHover ? 'rgba(86,226,255,0.25)' : 'rgba(86,226,255,0.10)';
+    ctx.strokeStyle = fsHover ? '#56e2ff' : 'rgba(86,226,255,0.5)';
+    ctx.lineWidth = 1.5;
+    roundRect(fsX, fsY, fsW, fsH, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font = 'bold 13px "Trebuchet MS"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = fsHover ? '#fff' : '#56e2ff';
+    ctx.fillText(isFullscreen() ? '⛶  EXIT FULLSCREEN' : '⛶  GO FULLSCREEN', fsX + fsW/2, fsY + fsH/2);
+    ctx.restore();
+    titleButtons.push({ x: fsX, y: fsY, w: fsW, h: fsH, action: 'fullscreen' });
+    y = fsY - 14;
+  }
 
   // === BIG START BUTTON (solid green, always visible) ===
   // The ONLY way to begin a game (besides keyboard SPACE/Enter). No more
