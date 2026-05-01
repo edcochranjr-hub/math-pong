@@ -2601,6 +2601,12 @@ function render() {
     drawHUD();
   }
 
+  // Spectacle effects (lightning / volcano / tornado / meteor) render BEFORE
+  // the state-specific UI so they don't obscure the problem panel + keypad
+  // numbers. Background-layer effects (aurora) already drew earlier behind
+  // the paddles.
+  drawEffectsFront();
+
   if (game.state === STATES.TITLE) drawTitle();
   else if (game.state === STATES.NAME_ENTRY) drawNameEntry();
   else if (game.state === STATES.PRACTICE_MENU) drawPracticeMenu();
@@ -2612,7 +2618,6 @@ function render() {
   else if (game.state === STATES.PROBLEM) drawProblem();
   else if (game.state === STATES.GAME_OVER) drawGameOver();
 
-  drawEffectsFront();
   drawToast();
 
   if (game.paused) drawPauseOverlay();
@@ -3104,27 +3109,37 @@ function drawKey(x, y, w, h, label, isSubmit) {
   const hovered = hitTest(mouseX, mouseY, { x, y, w, h });
   ctx.save();
   if (isSubmit) {
+    // Solid green submit key — always readable
     const grad = ctx.createLinearGradient(x, y, x, y + h);
-    grad.addColorStop(0, hovered ? 'rgba(127,255,144,0.40)' : 'rgba(127,255,144,0.22)');
-    grad.addColorStop(1, hovered ? 'rgba(127,255,144,0.18)' : 'rgba(127,255,144,0.06)');
+    grad.addColorStop(0, hovered ? 'rgba(127,255,144,0.70)' : 'rgba(127,255,144,0.50)');
+    grad.addColorStop(1, hovered ? 'rgba(60,200,80,0.55)' : 'rgba(60,200,80,0.30)');
     ctx.fillStyle = grad;
     ctx.strokeStyle = '#7fff90';
-    ctx.lineWidth = hovered ? 2.5 : 1.6;
+    ctx.lineWidth = hovered ? 2.6 : 1.8;
     ctx.shadowColor = '#7fff90';
-    ctx.shadowBlur = hovered ? 18 : 0;
+    ctx.shadowBlur = hovered ? 20 : 0;
   } else {
-    ctx.fillStyle = hovered ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.10)';
-    ctx.strokeStyle = hovered ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.30)';
-    ctx.lineWidth = 1.4;
+    // Solid dark key — visible against ANY background (stars, spectacle FX,
+    // bright flashes, etc). Calculator-style.
+    const grad = ctx.createLinearGradient(x, y, x, y + h);
+    grad.addColorStop(0, hovered ? 'rgba(70,90,150,0.96)'  : 'rgba(40,55,105,0.94)');
+    grad.addColorStop(1, hovered ? 'rgba(45,60,115,0.96)'  : 'rgba(20,30,75,0.94)');
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = hovered ? '#56e2ff' : 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = hovered ? 2.2 : 1.5;
   }
   roundRect(x, y, w, h, 9);
   ctx.fill();
   ctx.stroke();
   ctx.shadowBlur = 0;
-  ctx.font = 'bold ' + Math.round(h * (isSubmit ? 0.42 : 0.5)) + 'px "Trebuchet MS"';
+  ctx.font = 'bold ' + Math.round(h * (isSubmit ? 0.44 : 0.55)) + 'px "Trebuchet MS"';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillStyle = isSubmit ? '#7fff90' : '#fff';
+  ctx.fillStyle = '#fff';
+  // Subtle drop shadow on the digit so it pops over any underlying gradient
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 2;
+  ctx.shadowOffsetY = 1;
   ctx.fillText(label, x + w/2, y + h/2);
   ctx.restore();
 }
