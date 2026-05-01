@@ -303,11 +303,18 @@ const game = {
   // Pong interlude state (null when not in PONG state).
   pong: null,
   // Set to true mid-match the first time the player hits the streak trigger.
-  // Played as a bonus AFTER the match ends, not as a mid-match interlude.
+  // Played as a bonus AFTER the round ends, not as a mid-match interlude.
   pongEarned: false,
   // Wall-clock match start. Used to enforce a 2-minute hard cap so a stuck
-  // game can't drag on forever. Reset by startGame().
+  // game can't drag on forever. Reset on each round start.
   matchStartTime: 0,
+  // Best-of-5 round tracking. Each "round" is a first-to-WIN_SCORE match;
+  // first to 3 round wins takes the whole game.
+  matchRounds: { left: 0, right: 0 },
+  roundNumber: 1,
+  // True only when the best-of-5 game is fully decided. Distinguishes
+  // "round just ended, more to go" from "game over, back to title".
+  gameOver: false,
   stateTimer: 0,
   ball: { x: 0, y: 0, r: 14, color: '#fff', trail: [], travel: null },
   paddleL: { x: 0, y: 0, w: 16, h: 120, color1: '#56e2ff', color2: '#3b82f6', name: store.names.left,  side: 'left',  pulse: 0, targetY: 0, vibe: 0 },
@@ -1007,21 +1014,29 @@ canvas.addEventListener('click', (e) => {
     return;
   }
 
-  // Game over — tap anywhere advances. If a 15-streak earned bonus Pong,
-  // play that next; otherwise return to title.
+  // Game over — tap anywhere advances. Routing depends on whether the
+  // best-of-5 is fully decided and whether a bonus pong was earned.
   if (game.state === STATES.GAME_OVER) {
-    if (game.pongEarned) {
+    if (game.gameOver) {
       game.pongEarned = false;
-      startPongStandalone();
-    } else {
       game.state = STATES.TITLE;
+    } else if (game.pongEarned) {
+      game.pongEarned = false;
+      startBonusPongAfterRound();
+    } else {
+      startNextRound();
     }
     sfx.type();
     return;
   }
 
-  // Name entry — tap anywhere acts like Enter (advance to next side or start the game)
+  // Name entry — BACK button cancels to title; tap anywhere else acts like Enter.
   if (game.state === STATES.NAME_ENTRY) {
+    if (game._nameEntryBackBtn && hitTest(x, y, game._nameEntryBackBtn)) {
+      game.state = STATES.TITLE;
+      sfx.type();
+      return;
+    }
     handleNameEntryKey({ key: 'Enter', preventDefault: () => {} });
     return;
   }
@@ -1391,18 +1406,24 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // === GAME OVER ===
+  // === GAME OVER (handles round-end AND full game-over) ===
   if (game.state === STATES.GAME_OVER) {
     if (e.key === ' ' || e.key === 'Enter') {
       e.preventDefault();
-      if (game.pongEarned) {
+      if (game.gameOver) {
+        // Full best-of-5 decided — return to title regardless of pong status.
         game.pongEarned = false;
-        startPongStandalone();
-      } else {
         game.state = STATES.TITLE;
+      } else if (game.pongEarned) {
+        // Round-end + bonus earned: play pong, then auto-start next round.
+        game.pongEarned = false;
+        startBonusPongAfterRound();
+      } else {
+        // Round-end, no bonus: straight to next round.
+        startNextRound();
       }
     } else if (e.key === 'Escape') {
-      // Always bail to title on ESC, even if pong was earned.
+      // ESC always bails to title (skipping any pong / next round).
       e.preventDefault();
       game.pongEarned = false;
       game.state = STATES.TITLE;
@@ -1745,17 +1766,40 @@ function onWrong(timedOut, userAnswer) {
   game.stateTimer = 2.4; // longer than before so the equation toast lands
 
   if (game.score.left >= WIN_SCORE || game.score.right >= WIN_SCORE) {
+    // Round ended. Track winner; check whether the whole best-of-5 is decided.
     game.winnerSide = game.score.left >= WIN_SCORE ? 'left' : 'right';
-    store.stats.gamesPlayed = (store.stats.gamesPlayed || 0) + 1;
-    // H2H: record this match's winner→loser pair (skipped if either is a default name).
-    const winnerName = game.winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
-    const loserName  = game.winnerSide === 'left' ? game.paddleR.name : game.paddleL.name;
-    recordResult(winnerName, loserName);
-    saveStore();
+    game.matchRounds[game.winnerSide]++;
+    const ROUNDS_TO_WIN = 3; // best of 5 = first to 3
+    if (game.matchRounds[game.winnerSide] >= ROUNDS_TO_WIN) {
+      // Full game decided
+      game.gameOver = true;
+      store.stats.gamesPlayed = (store.stats.gamesPlayed || 0) + 1;
+      // H2H: record only on full-game wins (not per round).
+      const winnerName = game.winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
+      const loserName  = game.winnerSide === 'left' ? game.paddleR.name : game.paddleL.name;
+      recordResult(winnerName, loserName);
+      saveStore();
+    } else {
+      // Round ended but match continues
+      game.gameOver = false;
+    }
   }
 }
 
 function startGame() {
+  // Full new game (best of 5 rounds). Reset everything including round count.
+  game.matchRounds = { left: 0, right: 0 };
+  game.roundNumber = 1;
+  game.gameOver = false;
+  resetForNewRound();
+  game.toast = { text: 'ROUND 1 — LEVEL 1   +', t: 1.6, color: '#ffe066' };
+  updatePaddleNames();
+  startRound(Math.random() < 0.5 ? 'left' : 'right');
+}
+
+// Reset everything that's per-round (score, streaks, totalCorrect, etc) but
+// preserves the best-of-5 round count.
+function resetForNewRound() {
   game.score = { left: 0, right: 0 };
   game.streak = { left: 0, right: 0 };
   game.totalCorrect = 0;
@@ -1769,11 +1813,16 @@ function startGame() {
   game.pongEarned = false;
   game.pong = null;
   game.matchStartTime = performance.now();
-  // recentProblems is intentionally NOT reset — it's a rolling, persistent
-  // buffer (see store.recentProblems) so variety holds across matches and
-  // sessions, not just within a single match.
-  game.toast = { text: 'LEVEL 1   +', t: 1.4, color: '#ffe066' };
-  updatePaddleNames();
+}
+
+function startNextRound() {
+  game.roundNumber = (game.roundNumber || 0) + 1;
+  resetForNewRound();
+  game.toast = {
+    text: 'ROUND ' + game.roundNumber + '   —   ' +
+          game.matchRounds.left + ' to ' + game.matchRounds.right,
+    t: 1.8, color: '#ffe066'
+  };
   startRound(Math.random() < 0.5 ? 'left' : 'right');
 }
 
@@ -1982,6 +2031,7 @@ function startPongInterlude(opts) {
     nextMathSide: opts.nextMathSide || null,          // null for standalone
     standalone: !!opts.standalone,
     winScore: opts.winScore || PONG.WIN_SCORE,
+    afterAction: opts.afterAction || 'title',         // 'title' | 'nextRound'
     keys: { w: false, s: false, up: false, down: false },
     touches: { left: null, right: null },
     intro: 1.6,
@@ -1998,7 +2048,13 @@ function startPongInterlude(opts) {
 
 function startPongStandalone() {
   // Longer game when it's the whole thing, not an interlude.
-  startPongInterlude({ standalone: true, winScore: 7 });
+  startPongInterlude({ standalone: true, winScore: 7, afterAction: 'title' });
+}
+
+// Bonus pong played BETWEEN rounds in best-of-5 (when streak earned). After
+// it ends, the next round auto-starts.
+function startBonusPongAfterRound() {
+  startPongInterlude({ standalone: true, winScore: 3, afterAction: 'nextRound' });
 }
 
 function pongStartServe(servingSide) {
@@ -2082,12 +2138,16 @@ function updatePong(dt) {
   if (p.endCountdown !== null) {
     p.endCountdown -= dt;
     if (p.endCountdown <= 0) {
+      const after = p.afterAction;
       if (p.standalone) {
-        // Standalone Pong (easter egg) — return to title screen, no math match.
         game.pong = null;
-        game.state = STATES.TITLE;
+        if (after === 'nextRound') {
+          startNextRound();
+        } else {
+          game.state = STATES.TITLE;
+        }
       } else {
-        // Interlude — math match resumes from where we left off.
+        // Interlude — math match resumes from where we left off (legacy path).
         const nextSide = p.nextMathSide;
         game.pong = null;
         startRound(nextSide);
@@ -2510,23 +2570,30 @@ function update(dt) {
   // Game logic only when NOT paused
   if (game.paused) return;
 
-  // 2-minute match cap — defensive against very long matches. If the wall
-  // clock exceeds 120s and no winner has been declared, force-end the match
-  // with whoever's leading. Versus modes only.
+  // 2-minute round cap — defensive against very long single rounds. Awards
+  // the round to whoever's leading on score, then routes through the same
+  // round-end / game-end logic as a normal first-to-N finish.
   const isVersus = game.mode === 'versus2p' || game.mode === 'versus1p';
   const inLiveMatch = isVersus && !game.winnerSide && game.matchStartTime > 0 &&
     (game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT);
   if (inLiveMatch && (performance.now() - game.matchStartTime) / 1000 > 120) {
     const winnerSide = game.score.left >= game.score.right ? 'left' : 'right';
     game.winnerSide = winnerSide;
+    game.matchRounds[winnerSide]++;
     const winnerName = winnerSide === 'left' ? game.paddleL.name : game.paddleR.name;
-    const loserName  = winnerSide === 'left' ? game.paddleR.name : game.paddleL.name;
-    recordResult(winnerName, loserName);
-    store.stats.gamesPlayed = (store.stats.gamesPlayed || 0) + 1;
-    saveStore();
-    setupGameOverPhrases();
+    if (game.matchRounds[winnerSide] >= 3) {
+      // Best-of-5 fully decided
+      game.gameOver = true;
+      const loserName = winnerSide === 'left' ? game.paddleR.name : game.paddleL.name;
+      recordResult(winnerName, loserName);
+      store.stats.gamesPlayed = (store.stats.gamesPlayed || 0) + 1;
+      saveStore();
+      setupGameOverPhrases();
+    } else {
+      game.gameOver = false;
+    }
     game.state = STATES.GAME_OVER;
-    game.toast = { text: '2:00 TIME — ' + winnerName + ' WINS', t: 2.6, color: '#ffe066' };
+    game.toast = { text: '2:00 TIME — ' + winnerName + ' WINS THE ROUND', t: 2.6, color: '#ffe066' };
     if (!store.muted) sfx.score();
     return;
   }
@@ -2587,8 +2654,10 @@ function update(dt) {
     game.stateTimer -= dt;
     if (game.stateTimer <= 0) {
       if (game.winnerSide) {
+        // Round end (or full-game end) — both route through GAME_OVER, which
+        // displays different copy + dispatches differently based on game.gameOver.
+        if (game.gameOver) setupGameOverPhrases();
         game.state = STATES.GAME_OVER;
-        setupGameOverPhrases();
         sfx.score();
       } else if (game.mode === 'practice') {
         startRound('left');
@@ -2846,6 +2915,15 @@ function drawHUD() {
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
     const modeTag = game.mode === 'versus1p' ? '1P vs CPU' : '2 PLAYER';
     ctx.fillText('FIRST TO ' + WIN_SCORE + '  •  ' + curDiff().name.replace(/\s+/g, ' ') + '  •  ' + modeTag, W/2, 56);
+    // Best-of-5 round indicator
+    ctx.font = 'bold 13px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,224,102,0.75)';
+    ctx.fillText(
+      'ROUND ' + (game.roundNumber || 1) + ' — best of 5  ·  ' +
+      game.paddleL.name + ' ' + (game.matchRounds.left || 0) +
+      '  —  ' + (game.matchRounds.right || 0) + ' ' + game.paddleR.name,
+      W/2, 76
+    );
   }
   ctx.restore();
 
@@ -2873,13 +2951,14 @@ function drawHUD() {
     ctx.restore();
   }
 
-  // === PAUSE BUTTON (top-center, just below the level/diff line) ===
+  // === PAUSE BUTTON (top-center, below the round-score line) ===
   // Tappable on touch, also serves as a visible cue on desktop. Hidden on
   // game-over since there's nothing to pause then.
   if (game.state === STATES.PROBLEM || game.state === STATES.BALL || game.state === STATES.RESULT) {
     const pbW = 90, pbH = 28;
     const pbX = W/2 - pbW/2;
-    const pbY = narrow ? 80 : 86;
+    // Pushed down to clear the new "ROUND N — best of 5" line at y=76.
+    const pbY = narrow ? 100 : 106;
     const hovered = hitTest(mouseX, mouseY, { x: pbX, y: pbY, w: pbW, h: pbH });
     ctx.save();
     ctx.fillStyle = hovered ? 'rgba(255,255,255,0.20)' : 'rgba(255,255,255,0.08)';
@@ -3265,8 +3344,8 @@ function drawTitle() {
     custom:   'CUSTOM',
   };
   const modeBlurbs = {
-    versus2p: 'Same keyboard, taking turns. First to 7.',
-    versus1p: 'Solo vs the computer. Difficulty sets CPU speed & accuracy.',
+    versus2p: 'Best of 5 rounds. Each round = first to 7.',
+    versus1p: 'You vs the computer — best of 5 rounds.',
     practice: 'Drill one operation. No score, just streak.',
     custom:   'Pick ops + how big the numbers get. Algebra too.'
   };
@@ -3868,6 +3947,13 @@ function drawNameEntry() {
         : 'Suggested:  MIMI     (Enter to accept, or Backspace to change)',
       W/2, H/2 - 150);
   }
+
+  // Tappable BACK button so mobile users can bail out without a keyboard.
+  const nbW = 160, nbH = 38;
+  const nbX = W/2 - nbW/2;
+  const nbY = H/2 + 175;
+  drawButton(nbX, nbY, nbW, nbH, 'BACK', '#ff7ad8');
+  game._nameEntryBackBtn = { x: nbX, y: nbY, w: nbW, h: nbH };
   ctx.restore();
 }
 
@@ -4051,24 +4137,34 @@ function drawGameOver() {
 
   const winner = game.winnerSide === 'left' ? game.paddleL : game.paddleR;
   const accent = game.winnerSide === 'left' ? '#56e2ff' : '#ff7ad8';
-  const loserAccent = game.winnerSide === 'left' ? '#ff7ad8' : '#56e2ff';
+  const isFullGameOver = game.gameOver;
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = 'bold 120px "Trebuchet MS"';
+  // Headline: "WINS THE GAME!" if full best-of-5 decided, else "WINS ROUND N"
+  ctx.font = 'bold ' + (isFullGameOver ? 120 : 84) + 'px "Trebuchet MS"';
   ctx.shadowColor = accent;
   ctx.shadowBlur = 40;
   ctx.fillStyle = accent;
-  ctx.fillText(winner.name + ' WINS!', W/2, H/2 - 130);
+  if (isFullGameOver) {
+    ctx.fillText(winner.name + ' WINS!', W/2, H/2 - 140);
+  } else {
+    ctx.fillText(winner.name + ' wins round ' + game.roundNumber, W/2, H/2 - 130);
+  }
 
   ctx.shadowBlur = 0;
   ctx.font = 'bold 40px "Trebuchet MS"';
   ctx.fillStyle = '#fff';
-  ctx.fillText(game.score.left + '  —  ' + game.score.right, W/2, H/2 - 40);
+  ctx.fillText(game.score.left + '  —  ' + game.score.right + '  (this round)', W/2, H/2 - 50);
 
-  ctx.font = '20px "Trebuchet MS"';
+  // Best-of-5 round score
+  ctx.font = 'bold 24px "Trebuchet MS"';
   ctx.fillStyle = '#ffe066';
-  ctx.fillText(game.totalCorrect + ' problems solved this match   •   best streak ' + game.matchBestStreak, W/2, H/2 + 10);
+  ctx.fillText('Game score:  ' + game.matchRounds.left + '  —  ' + game.matchRounds.right + '   (best of 5)', W/2, H/2 - 12);
+
+  ctx.font = '18px "Trebuchet MS"';
+  ctx.fillStyle = '#ffe066';
+  ctx.fillText(game.totalCorrect + ' problems solved this round   •   best streak ' + game.matchBestStreak, W/2, H/2 + 18);
 
   // Lifetime
   const s = store.stats;
@@ -4084,9 +4180,9 @@ function drawGameOver() {
     ctx.fillText('H2H:   ' + h2h.nameA + '  ' + h2h.aWins + '  —  ' + h2h.bWins + '  ' + h2h.nameB, W/2, H/2 + 73);
   }
 
-  // Personalized phrases for named players (e.g. MIMI, TREY)
+  // Personalized phrases for named players (e.g. MIMI, TREY) — only on full game over
   let pressSpaceY = H/2 + 160;
-  if (game.gameOverPhrases) {
+  if (game.gameOverPhrases && isFullGameOver) {
     let phraseY = H/2 + 105;
     if (game.gameOverPhrases.winPhrase) {
       ctx.font = 'italic bold 22px "Trebuchet MS"';
@@ -4110,8 +4206,8 @@ function drawGameOver() {
 
   const t = performance.now() / 1000;
   const blink = (Math.floor(t * 2) % 2) ? 1 : 0.5;
-  if (game.pongEarned) {
-    // Bonus Pong unlocked — celebratory prompt instead of the normal continue.
+  if (game.pongEarned && !isFullGameOver) {
+    // Bonus Pong between rounds (only if game isn't already decided).
     ctx.font = 'bold 22px "Trebuchet MS"';
     ctx.fillStyle = '#7fff90';
     ctx.shadowColor = '#7fff90';
@@ -4123,11 +4219,15 @@ function drawGameOver() {
     ctx.fillText('TAP / SPACE  →  PLAY PONG', W/2, pressSpaceY + 26);
     ctx.font = '13px "Trebuchet MS"';
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.fillText('(ESC to skip and return to menu)', W/2, pressSpaceY + 56);
+    ctx.fillText('(ESC to skip and start next round)', W/2, pressSpaceY + 56);
+  } else if (isFullGameOver) {
+    ctx.font = 'bold 28px "Trebuchet MS"';
+    ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
+    ctx.fillText('TAP / SPACE  →  MAIN MENU', W/2, pressSpaceY);
   } else {
     ctx.font = 'bold 28px "Trebuchet MS"';
     ctx.fillStyle = 'rgba(255,255,255,' + blink + ')';
-    ctx.fillText('PRESS  SPACE  TO  CONTINUE', W/2, pressSpaceY);
+    ctx.fillText('TAP / SPACE  →  NEXT ROUND', W/2, pressSpaceY);
   }
   ctx.restore();
 }
