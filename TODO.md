@@ -2,6 +2,31 @@
 
 Last updated: 2026-04-30
 
+## Live URLs
+- **Production:**  https://math-pong.vercel.app/
+- **GitHub repo:**  https://github.com/edcochranjr-hub/math-pong
+- **Auto-deploy:**  every `git push` to `main` redeploys via Vercel (~30s)
+
+## Current build (2026-05-01, commit a6ffedd)
+Major features in place:
+- Best-of-5 round structure (first to 3 round wins). Each round = first to 7 points.
+- Pong bonus between rounds when 15+ correct hit during a round (winScore 3, then auto-starts next round)
+- Standalone easter-egg pong (winScore 7, returns to title)
+- Three difficulty modes with mode-specific magnitude caps:
+  - KIDS (5-8): single-digit add/sub only, generous time
+  - FAMILY (9-12): add ≤250, sub ≤99, mul ≤99 + round multipliers (5/10/25/50/100), pow with single-digit bases
+  - GENIUS (13-adult): full smooth ramp through 4-digit
+- Powers rule: base<5 → exp up to 4; base≥5 → exp up to 3 (caps 4^4=256, 9^3=729)
+- Multi-choice mode (default ON for touch devices) + on-screen number keypad for typing mode
+- Tappable everything: chevrons, MC toggle, names, START, pause, keypad, choices
+- Mobile fullscreen support (auto on START tap, manual button)
+- Pause overlay with RESUME / QUIT TO MAIN MENU buttons
+- Pong landscape rotate prompt for portrait phone with tappable Back to menu
+- Named-player phrases: MIMI loses 25% chance, TREY-vs-MIMI wins 25% chance
+- Two easter eggs: decorated egg (top right of MC line) → pong; "Games By Trey" credit (bottom-left) → Mom&Dad note
+- H2H records, lifetime stats, weak-spot weighting, problem-history dedup (50 deep, persistent)
+- 2-minute round cap as defensive backstop
+
 ## Deferred features
 - [ ] **Daily challenge mode** — seeded RNG so the same problems appear for everyone playing on a given day; persistent local "best of today" score. Adds a hook to come back daily. Self-contained chunk; can be added without touching versus/practice/custom flows.
 - [x] ~~**Pong mini-game interlude**~~ — DONE 2026-04-30. Triggers once per match after 10 correct answers (versus modes only). W/S + ↑/↓ keyboard or touch (multi-touch on tablet). First-to-3, then math resumes. `PONG` constant at top of index.html for tuning.
